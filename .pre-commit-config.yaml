@@ -1,9 +1,9 @@
-# Lint/format/test the `ski` crate (this repo). Scoped by `files:` so the hooks
+# Lint/format the `ski` crate (this repo). Scoped by `files:` so the hooks
 # only fire when Rust sources change; everything else is unaffected. Requires
 # cargo on PATH (rustup). The hooks pin `--no-default-features` to stay offline
 # (no model download); the default `fastembed` lane runs in CI for the real embedder.
 # `default_install_hook_types` makes a plain `pre-commit install` wire BOTH the
-# pre-commit stage (fmt/clippy/test below) and the commit-msg stage (Conventional
+# pre-commit stage (fmt/clippy below) and the commit-msg stage (Conventional
 # Commits check) — the latter keeps subjects machine-parseable for release notes.
 default_install_hook_types: [pre-commit, commit-msg]
 repos:
@@ -23,12 +23,6 @@ repos:
       - id: ski-clippy
         name: cargo clippy (ski)
         entry: cargo clippy --all-targets --no-default-features -- -D warnings
-        language: system
-        files: \.rs$
-        pass_filenames: false
-      - id: ski-test
-        name: cargo test (ski)
-        entry: cargo test --no-default-features
         language: system
         files: \.rs$
         pass_filenames: false
