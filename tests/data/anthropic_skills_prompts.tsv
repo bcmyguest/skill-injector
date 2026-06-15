@@ -1,0 +1,111 @@
+# Test prompts for the anthropic/skills library (github.com/anthropics/skills).
+# Drives ski's ranker against the 17 skills shipped by the
+# `anthropic-agent-skills` marketplace plugin.
+#
+# Format: <expected-skill-id>\t<kind>\t<prompt>
+#   kind = direct      explicit domain words; bag-of-words embedder should nail it
+#          task        realistic, indirect phrasing; harder lexically, the bge lane should help
+#          confusable  two skills legitimately compete; expected is the dominant one
+#          negative    should match NO skill (top score under min_similarity); expected = (none)
+#
+# Run:  ./run-anthropic-prompts.sh         (see README.md)
+# Tune: ski why "<prompt>"                 (shows the full ranked list + scores)
+#
+# Lines beginning with # and blank lines are ignored by the runner.
+
+# --- algorithmic-art -------------------------------------------------------
+algorithmic-art	direct	create generative art with p5.js using a flow field and seeded randomness
+algorithmic-art	direct	write a particle system animation with interactive parameter exploration
+algorithmic-art	task	I want some code-based art I can tweak with sliders
+
+# --- brand-guidelines ------------------------------------------------------
+brand-guidelines	direct	apply Anthropic's official brand colors and typography to this poster
+brand-guidelines	direct	style this artifact with our company design standards and brand look-and-feel
+brand-guidelines	task	make this slide match our company's visual identity
+
+# --- canvas-design ---------------------------------------------------------
+canvas-design	direct	design a poster as a PNG using a strong visual design philosophy
+canvas-design	direct	create an original piece of visual art and save it as a PDF
+canvas-design	task	I need a printable art piece to hang on the wall
+
+# --- claude-api ------------------------------------------------------------
+claude-api	direct	what is the model id and pricing for Claude Opus 4.8
+claude-api	direct	how do I stream tool use with the Anthropic SDK and count tokens
+claude-api	task	migrate my app from Sonnet to the latest Claude model with prompt caching
+
+# --- doc-coauthoring -------------------------------------------------------
+doc-coauthoring	direct	co-author a technical spec with me using a structured documentation workflow
+doc-coauthoring	direct	help me write a decision doc and iterate on it section by section
+doc-coauthoring	task	I need to draft a proposal and want a guided process to refine it
+
+# --- docx ------------------------------------------------------------------
+docx	direct	create a Word document with a table of contents, headings, and page numbers
+docx	direct	find and replace text in this .docx and keep the tracked changes
+docx	task	turn these meeting notes into a polished letter as a Word file
+
+# --- frontend-design -------------------------------------------------------
+frontend-design	direct	give me a distinctive visual design direction and typography for this new UI
+frontend-design	direct	make this interface feel intentional instead of like templated defaults
+frontend-design	task	this dashboard looks generic, reshape its aesthetic
+
+# --- internal-comms --------------------------------------------------------
+internal-comms	direct	write an internal leadership status update for the project
+internal-comms	direct	draft an incident report for last night's outage
+internal-comms	task	compose this month's company newsletter for the whole org
+
+# --- mcp-builder -----------------------------------------------------------
+mcp-builder	direct	build an MCP server in Python with FastMCP to wrap this REST API
+mcp-builder	direct	create a Node TypeScript MCP server with well-designed tools
+mcp-builder	task	I want to expose this external service to an LLM through tools
+
+# --- pdf -------------------------------------------------------------------
+pdf	direct	merge these three PDFs into one file
+pdf	direct	extract the tables and text from this PDF
+pdf	direct	OCR this scanned pdf so it becomes searchable
+pdf	task	fill out the form fields in this document and flatten it
+
+# --- pptx ------------------------------------------------------------------
+pptx	direct	create a pitch deck as a .pptx with speaker notes
+pptx	direct	extract the text from every slide in this presentation
+pptx	task	I need to update the layouts and notes in my slide deck
+
+# --- skill-creator ---------------------------------------------------------
+skill-creator	direct	create a new skill from scratch with a SKILL.md
+skill-creator	direct	optimize this skill's description for better triggering accuracy
+skill-creator	task	run an eval to benchmark my skill's performance and variance
+
+# --- slack-gif-creator -----------------------------------------------------
+slack-gif-creator	direct	make me an animated GIF of a cat dancing optimized for Slack
+slack-gif-creator	task	I need a looping reaction gif sized for our slack channel
+
+# --- theme-factory ---------------------------------------------------------
+theme-factory	direct	apply a preset theme with colors and fonts to these slides
+theme-factory	direct	generate a new on-the-fly theme and style this HTML landing page
+theme-factory	task	give my report a consistent color and font scheme
+
+# --- web-artifacts-builder -------------------------------------------------
+web-artifacts-builder	direct	build a multi-component claude.ai artifact with React, Tailwind, and shadcn/ui
+web-artifacts-builder	direct	I need an elaborate web artifact with routing and state management
+web-artifacts-builder	task	make an interactive multi-page app to render as an artifact
+
+# --- webapp-testing --------------------------------------------------------
+webapp-testing	direct	use Playwright to test my local web app and capture browser screenshots
+webapp-testing	direct	debug the UI behavior of my running webapp and view the browser logs
+webapp-testing	task	verify the frontend of the app I just started works
+
+# --- xlsx ------------------------------------------------------------------
+xlsx	direct	open this xlsx and add a column that computes a formula
+xlsx	direct	clean this messy CSV into a proper spreadsheet
+xlsx	task	compute the totals and make a chart in my spreadsheet
+
+# --- confusables (two skills compete; the dominant one wins) ---------------
+pdf	confusable	convert this PDF into an editable Word document
+xlsx	confusable	turn the data in this spreadsheet into a slide deck
+docx	confusable	export this Word report to a PDF
+canvas-design	confusable	design a poster and also generate a matching color theme
+
+# --- negatives (should match no skill; top score under threshold) ----------
+(none)	negative	what time is it in Tokyo right now
+(none)	negative	interactively rebase to squash the last three git commits
+(none)	negative	explain how the TCP three-way handshake works
+(none)	negative	rename the variable foo to bar in this rust function

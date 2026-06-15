@@ -1,0 +1,17 @@
+# Rust build output
+/target
+
+# fastembed model cache (downloaded on first --features fastembed run)
+/.fastembed_cache
+.fastembed_cache/
+
+# opencode adapter deps + local test harness
+opencode/node_modules
+/.opencode
+
+# Claude Code local, machine-specific settings
+.claude/settings.local.json
+
+# editor / OS cruft
+*.swp
+.DS_Store

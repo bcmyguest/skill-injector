@@ -1,0 +1,36 @@
+[package]
+name = "ski"
+version = "0.1.0"
+edition = "2021"
+description = "skill-inject: local semantic auto-injection of agent skills"
+license = "MIT"
+
+[[bin]]
+name = "ski"
+path = "src/main.rs"
+
+[lib]
+name = "ski"
+path = "src/lib.rs"
+
+[features]
+# Default build is offline & dependency-light: the bag-of-words embedder, no ONNX.
+# Production enables `fastembed` for real bge-small / MiniLM embeddings.
+default = []
+fastembed = ["dep:fastembed"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rustls (not native-tls) for the model download so the feature build needs no
+# system OpenSSL; ort-download-binaries fetches the ONNX runtime at build time.
+fastembed = { version = "4", optional = true, default-features = false, features = [
+    "ort-download-binaries",
+    "hf-hub-rustls-tls",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true

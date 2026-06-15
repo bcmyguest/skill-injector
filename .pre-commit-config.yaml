@@ -1,0 +1,25 @@
+# Lint/format/test the `ski` crate (this repo). Scoped by `files:` so the hooks
+# only fire when Rust sources change; everything else is unaffected. Requires
+# cargo on PATH (rustup). Default features only = offline, no model download.
+# Enable `--features fastembed` in CI for the real embedder.
+repos:
+  - repo: local
+    hooks:
+      - id: ski-fmt
+        name: cargo fmt (ski)
+        entry: cargo fmt --all -- --check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+      - id: ski-clippy
+        name: cargo clippy (ski)
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        files: \.rs$
+        pass_filenames: false
+      - id: ski-test
+        name: cargo test (ski)
+        entry: cargo test
+        language: system
+        files: \.rs$
+        pass_filenames: false

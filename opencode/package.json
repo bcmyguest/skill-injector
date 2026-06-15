@@ -1,0 +1,17 @@
+{
+  "name": "skill-inject-opencode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "opencode adapter for skill-inject (ski) — local prompt-aware skill injection",
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.17.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
