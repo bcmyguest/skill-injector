@@ -1,13 +1,54 @@
 # skill-inject (`ski`)
 
 Local, model-agnostic **automatic skill injection** for [Claude Code](https://docs.claude.com/en/docs/claude-code)
-and [opencode](https://opencode.ai). A hook embeds your prompt **locally**, ranks it
-against your installed skill descriptions, and — when one is relevant — injects that
-skill into context.
+and [opencode](https://opencode.ai).
 
-The model still chooses which *files* a skill points to; `ski` only guarantees the
-right skill is **considered** when it matters. Skills the model loads on its own are
-tracked and never re-injected.
+## Why this exists
+
+Agent skill systems advertise every skill's description to the model and trust it to
+notice the relevant one and invoke it. In practice that leaks:
+
+- **Missed triggers.** When a skill's description shares no vocabulary with your prompt,
+  the model overlooks it — the match is *semantic*, not lexical. The more skills you
+  install, the more often the right one hides in the crowd.
+- **Model-dependent.** "Pick the skill from a wall of descriptions" is something even
+  frontier models do unevenly, and smaller or local models do worse. Which skill fires
+  drifts with whatever model is driving the session.
+- **Always-on cost.** Every description sits in the context window every turn, relevant
+  or not.
+
+`ski` replaces the guesswork with a deterministic local retriever: it embeds your prompt
+on CPU, ranks it against your skill descriptions, and injects the matched skill **only
+when one is genuinely relevant** — the same result no matter which model runs, with no
+API call and nothing leaving your machine. The model still chooses which *files* a skill
+points to; `ski` only guarantees the right skill is **in the room** when it matters.
+Skills the model loads on its own are tracked and never re-injected.
+
+### See it decide
+
+`ski` scores every installed skill against your prompt and injects **only** the ones
+above a fixed cutoff (`-2.50` below); a higher score is a stronger match. Real `ski why`
+output against a live library of 57 skills (reproduce with `ski index` then
+`ski why "<prompt>"`):
+
+```text
+$ ski why "open webui shows no models"
+  debug-lemonade    1.41   <- injected (clear winner)
+  frontend-design  -3.28   <- skipped
+```
+
+`open webui shows no models` shares **zero words** with `debug-lemonade` — the match is
+on *meaning*, not vocabulary, and it lands far ahead of every other skill. Keyword or
+description matching can't bridge that gap, and a model scanning 57 descriptions can
+easily miss it.
+
+```text
+$ ski why "what time is the meeting tomorrow"
+  handoff          -3.08   <- best skill, still below the cutoff
+```
+
+An off-topic prompt leaves every skill under the cutoff, so `ski` injects nothing — no
+false positives, no context pollution.
 
 This repo is a single Rust binary (`ski`) plus the thin host adapters that drive it,
 packaged as a one-plugin Claude Code marketplace. See [PLAN.md](./PLAN.md) for the
@@ -19,7 +60,7 @@ full design and [DEVELOPING.md](./DEVELOPING.md) for the dev workflow.
 pipeline (embed → retrieve → rerank) runs on CPU in about **half a second per prompt**.
 Real samples, ranked against a live library of 57 skills:
 
-| your prompt | skill `ski` injects | rerank score |
+| your prompt | skill `ski` injects | match score |
 |---|---|---|
 | `set up a python project with uv` | `uv-setup` | 2.76 |
 | `scaffold a new react typescript frontend` | `react-ts-setup` | 3.38 |
@@ -28,8 +69,8 @@ Real samples, ranked against a live library of 57 skills:
 | `open webui shows no models` | `debug-lemonade` | 1.41 |
 | `extract tables from a pdf` | `pdf` | 0.67 |
 
-That `open webui shows no models` → `debug-lemonade` hit shares **zero keywords** with the
-skill — it's pure semantic retrieval (cosine 0.69). Surface-token matching can't do that.
+Every row is a real `ski why` result. A higher **match score** means a stronger match;
+anything below `-2.50` is left out entirely (as in the off-topic example above).
 
 | operation (cold — every hook is a fresh process) | time |
 |---|---|
