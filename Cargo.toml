@@ -36,3 +36,29 @@ fastembed = { version = "4", optional = true, default-features = false, features
 [profile.release]
 opt-level = 3
 lto = true
+strip = true
+
+# --- packaging metadata (release pipeline) ---------------------------------
+# Both packagers ship the default (fastembed) binary; the ONNX runtime is
+# statically linked into `ski`, so the package only carries the one binary plus
+# docs. The bge model + reranker still download on first run (needs network).
+[package.metadata.deb]
+maintainer = "Brandon Guest <bguest95@gmail.com>"
+section = "utils"
+priority = "optional"
+extended-description = """\
+skill-inject (ski): local, model-agnostic semantic auto-injection of agent \
+skills for Claude Code and opencode. Embeds the prompt locally, ranks it \
+against skill descriptions, and injects the matched skill via hooks."""
+assets = [
+    ["target/release/ski", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/ski/README.md", "644"],
+    ["LICENSE", "usr/share/doc/ski/LICENSE", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/ski", dest = "/usr/bin/ski", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/ski/README.md", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/ski/LICENSE", mode = "644" },
+]

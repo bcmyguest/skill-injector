@@ -1,0 +1,112 @@
+name: Release
+
+# Tag-triggered release, modeled on rtk-ai/rtk but scoped to the one platform
+# the fastembed build supports: x86_64-unknown-linux-gnu. The ONNX runtime is
+# statically linked (ort-download-binaries), so there is no musl target and no
+# cross build — a plain glibc binary plus deb/rpm packages.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-gnu
+
+jobs:
+  # Refuse to release if the three manifests have drifted, or if they disagree
+  # with the tag being released.
+  version-sync:
+    name: Version lockstep check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check versions
+        run: bash scripts/version-sync.sh "${{ inputs.tag || github.ref_name }}"
+
+  build:
+    name: Build ${{ env.TARGET }}
+    needs: version-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (default = fastembed)
+        run: cargo build --release --target "$TARGET"
+      - name: Package tarball
+        run: |
+          cd "target/$TARGET/release"
+          tar -czvf "$GITHUB_WORKSPACE/ski-$TARGET.tar.gz" ski
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ski-tarball
+          path: ski-*.tar.gz
+
+  build-deb:
+    name: Build .deb
+    needs: version-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build deb
+        run: cargo deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ski-deb
+          path: target/debian/*.deb
+
+  build-rpm:
+    name: Build .rpm
+    needs: version-sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+      - name: Build release binary
+        run: cargo build --release
+      - name: Generate rpm
+        run: cargo generate-rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ski-rpm
+          path: target/generate-rpm/*.rpm
+
+  release:
+    name: Publish release
+    needs: [build, build-deb, build-rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage assets + checksums
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) \
+            -exec cp {} release/ \;
+          cd release
+          sha256sum * > checksums.txt
+          ls -l
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: release/*
+          generate_release_notes: true
