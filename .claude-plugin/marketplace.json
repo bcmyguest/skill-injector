@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Local, model-agnostic automatic skill injection for Claude Code and opencode",
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "plugins": [
     {
