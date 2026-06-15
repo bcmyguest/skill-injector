@@ -61,7 +61,7 @@ pub fn is_ambiguous(hits: &[Hit], cfg: &Config) -> bool {
 pub fn rerank(hits: &[Hit], idx: &Index, prompt: &str, cfg: &Config) -> Option<Vec<Hit>> {
     #[cfg(feature = "fastembed")]
     {
-        return fast::rerank(hits, idx, prompt, cfg);
+        fast::rerank(hits, idx, prompt, cfg)
     }
     #[cfg(not(feature = "fastembed"))]
     {
