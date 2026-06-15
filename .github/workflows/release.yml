@@ -93,6 +93,15 @@ jobs:
     needs: [build, build-deb, build-rpm]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-cliff needs full history + tags
+      - name: Generate release notes (git-cliff)
+        id: notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -109,4 +118,4 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: release/*
-          generate_release_notes: true
+          body: ${{ steps.notes.outputs.content }}
