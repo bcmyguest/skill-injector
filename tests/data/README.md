@@ -50,8 +50,8 @@ roots). It scopes `index`, `why`, `hook`, and the rest of the CLI alike.
 
 ## Reading the numbers
 
-The default build uses the **offline bag-of-words embedder**, which matches on
-lexical overlap only. Expect it to:
+The offline lane (`SKI_OFFLINE=1`) uses the **bag-of-words embedder**, which
+matches on lexical overlap only. Expect it to:
 
 - handle `direct` prompts that reuse the skill's own vocabulary,
 - miss most `task` prompts (synonyms, no shared tokens — e.g. "polished letter as
@@ -59,7 +59,7 @@ lexical overlap only. Expect it to:
 - let a few `negative`/distractor skills (`template-skill`, etc.) sneak above the
   `min_similarity` floor.
 
-So **treat the accuracy as a lexical-floor baseline, not a quality bar.** The
-semantic gains land with the `--features fastembed` (bge) lane; re-run both modes
-and re-tune `min_similarity` / `score_margin` there. The corpus is the fixed
+So **treat the bag-of-words accuracy as a lexical-floor baseline, not a quality
+bar.** The semantic gains land with the default `fastembed` (bge) lane; re-run both
+modes and re-tune `min_similarity` / `score_margin` there. The corpus is the fixed
 target the two embedders are compared against.

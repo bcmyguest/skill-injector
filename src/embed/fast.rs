@@ -1,9 +1,7 @@
-//! Real embeddings via fastembed (ONNX). Compiled only with the `fastembed`
-//! feature. Default: bge-small-en-v1.5; lite alt: all-MiniLM-L6-v2 (quantized).
-//!
-//! NOTE: the fastembed 4.x API surface (InitOptions / embed signatures) may
-//! need a minor tweak when the feature is first built against the pinned
-//! version; this is wired but not exercised in the offline default build.
+//! Real embeddings via fastembed (ONNX). Compiled with the `fastembed` feature,
+//! which is on by default; build `--no-default-features` to drop it for the offline
+//! bag-of-words lane. Default model: bge-small-en-v1.5; lite alt: all-MiniLM-L6-v2
+//! (quantized).
 
 use crate::embed::{EmbedKind, Embedder};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};

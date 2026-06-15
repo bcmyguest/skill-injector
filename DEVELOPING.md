@@ -36,8 +36,8 @@ src/
   skill.rs       # SKILL.md discovery + frontmatter parse
   embed/
     mod.rs       # Embedder trait + EmbedKind + build() backend selector
-    bow.rs       # offline bag-of-words backend (default)
-    fast.rs      # fastembed (bge/MiniLM) backend — behind the `fastembed` feature
+    bow.rs       # offline bag-of-words backend (`--no-default-features`)
+    fast.rs      # fastembed (bge/MiniLM) backend — the default `fastembed` feature
   index.rs       # persisted, incrementally-refreshed embedding index
   rank.rs        # cosine + keyword hybrid scoring; select() guardrails
 tests/
@@ -47,31 +47,32 @@ tests/
 ## 3. Build & run
 
 ```sh
-cargo build                      # offline: bag-of-words, no model/network
+cargo build --release            # default: real embedder + reranker (model downloads once)
 cargo run -- index               # build index at $XDG_DATA_HOME/ski/index.json
 cargo run -- why "set up pre-commit hooks" --top 5   # rank + scores (tuning aid)
 ```
 
-Real embeddings (downloads the model once, then offline):
+Offline bag-of-words build (no deps, no model/network):
 
 ```sh
-cargo build --release --features fastembed
+cargo build --no-default-features
 ```
 
 ## 4. Test
 
 ```sh
-cargo test                       # unit tests + golden tests (offline)
-cargo test --features fastembed  # same, against the real bge model (network on first run)
+cargo test --no-default-features  # unit + golden tests (offline, network-free)
+cargo test                        # default: same, against the real bge model (network on first run)
 ```
 
 - **Unit tests** live next to the code (`#[cfg(test)] mod tests`): tokenizer,
   hashing, bow determinism/normalization, cosine, keyword scoring, frontmatter.
 - **Golden tests** (`tests/golden.rs`) discover the self-contained fixture skills
   under `tests/fixtures/skills/` and assert the top-ranked skill for representative
-  prompts (e.g. `"bootstrap a new python project with uv"` → `uv-setup`). They run on
-  the offline bag-of-words backend so CI needs no model, and depend on nothing outside
-  this repo. When you add or rename a fixture, update the golden cases; use
+  prompts (e.g. `"bootstrap a new python project with uv"` → `uv-setup`). Run them with
+  `--no-default-features` to use the offline bag-of-words backend (no model, network-free,
+  deterministic); they depend on nothing outside this repo. When you add or rename a
+  fixture, update the golden cases; use
   `cargo run -- why "<prompt>"` to pick prompts and read the scores.
 
 ## 5. Lint & format
@@ -90,8 +91,8 @@ pre-commit install
 pre-commit run --all-files            # run on demand
 ```
 
-The hooks are `ski-fmt`, `ski-clippy`, `ski-test`. They use the default (offline)
-feature set; run the `fastembed` lane separately in CI.
+The hooks are `ski-fmt`, `ski-clippy`, `ski-test`. They pin `--no-default-features`
+(offline, no model download); run the default `fastembed` lane separately in CI.
 
 ## 6. Adding an embedding backend
 
@@ -110,7 +111,8 @@ index or on disk.
 
 ## 8. Conventions
 
-- Keep the default build offline and dependency-light; gate anything heavy (ONNX,
-  network) behind a cargo feature.
+- Keep an offline, dependency-light lane behind `--no-default-features` (bag-of-words,
+  no ONNX/network) — it's what the tests and pre-commit hooks run. Heavy deps (ONNX) stay
+  gated behind the `fastembed` feature, which is now on by default.
 - Fail open on the hook path: a ranking error must never block the user's prompt.
 - Match the surrounding style; `cargo fmt` + clippy `-D warnings` is the bar.

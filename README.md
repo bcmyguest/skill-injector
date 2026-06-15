@@ -3,7 +3,7 @@
 Local, model-agnostic **automatic skill injection** for [Claude Code](https://docs.claude.com/en/docs/claude-code)
 and [opencode](https://opencode.ai). A hook embeds your prompt **locally**, ranks it
 against your installed skill descriptions, and — when one is relevant — injects that
-skill into context. No `use_skill` tool call, no cloud-model decision, no round trip.
+skill into context.
 
 The model still chooses which *files* a skill points to; `ski` only guarantees the
 right skill is **considered** when it matters. Skills the model loads on its own are
@@ -39,16 +39,17 @@ prompt ─▶ adapter (Claude hook / opencode plugin) ─▶ ski (Rust, one bina
 
 The plugin is hooks-only and needs the `ski` binary on disk.
 
-1. **Build the binary.** Offline default build (bag-of-words, no model download):
+1. **Build the binary.** Default build = real embedder + reranker (downloads the
+   model once, then offline):
 
    ```sh
    cargo install --path .            # -> ~/.cargo/bin/ski
    ```
 
-   Or the real embedder + reranker (downloads the model once, then offline):
+   Or the offline bag-of-words build (no deps, no model download):
 
    ```sh
-   cargo install --path . --features fastembed
+   cargo install --path . --no-default-features
    ```
 
 2. **Enable the plugin** from this marketplace:
@@ -91,12 +92,13 @@ per-host (Claude `index.json`, opencode `index-opencode.json`) so the two never 
 
 ## Embedding backends
 
-- **Default (offline):** deterministic hashed bag-of-words. No deps, no network, no model
-  — surface-token matching plus the keyword boost. Used for tests and as a fallback.
-- **`--features fastembed`:** real embeddings via fastembed (ONNX). Retrieval with
+- **Default (`fastembed`):** real embeddings via fastembed (ONNX). Retrieval with
   `bge-small-en-v1.5` (the query gets bge's retrieval-instruction prefix; descriptions
   don't), reranking with JINA turbo. `all-MiniLM-L6-v2-q` is the low-RAM alternative.
   Models download once and cache.
+- **`--no-default-features` (offline):** deterministic hashed bag-of-words. No deps, no
+  network, no model — surface-token matching plus the keyword boost. Used for tests and
+  as the fallback when no recognized model is configured.
 
 The index is tagged with the embedder id, so switching backends/models triggers a full
 reindex automatically.
@@ -104,9 +106,9 @@ reindex automatically.
 ## Build, test, lint
 
 ```sh
-cargo build                          # offline: bag-of-words, no model download
-cargo test                           # unit + golden tests (offline, network-free)
-cargo build --release --features fastembed   # real embedder + reranker
+cargo build --release                # default: real embedder + reranker
+cargo build --no-default-features    # offline: bag-of-words, no model download
+cargo test --no-default-features     # unit + golden tests (offline, network-free)
 
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings

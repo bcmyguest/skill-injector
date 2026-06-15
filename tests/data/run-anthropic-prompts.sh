@@ -41,9 +41,11 @@ else
 fi
 
 cargo="$(command -v cargo || echo "$HOME/.cargo/bin/cargo")"
-# SKI_FEATURES=fastembed exercises the real bge embedder; unset uses bag-of-words.
+# Default (unset) exercises the real bge embedder (the crate's default `fastembed`
+# feature). SKI_OFFLINE=1 runs the offline bag-of-words lane (--no-default-features).
 feat_args=()
-[[ -n "${SKI_FEATURES:-}" ]] && feat_args=(--features "$SKI_FEATURES")
+[[ -n "${SKI_OFFLINE:-}" ]] && feat_args=(--no-default-features)
+[[ -n "${SKI_FEATURES:-}" ]] && feat_args+=(--features "$SKI_FEATURES")
 ski() { ( cd "$crate" && "$cargo" run -q "${feat_args[@]}" -- "$@" ); }
 
 # One warm-up build so `cargo run` chatter doesn't pollute the first result.

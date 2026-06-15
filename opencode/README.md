@@ -28,10 +28,11 @@ the same order as the Claude adapter's `ski-bootstrap.sh`.
 
 ## Install
 
-1. Build the binary (the `fastembed` feature enables the bge embedder + reranker):
+1. Build the binary (the default build ships the bge embedder + reranker; add
+   `--no-default-features` for the offline bag-of-words lane):
 
    ```bash
-   cargo install --path <repo> --features fastembed
+   cargo install --path <repo>
    ```
 
 2. Make opencode load the plugin. Either drop the file into opencode's

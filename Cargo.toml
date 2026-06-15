@@ -14,9 +14,11 @@ name = "ski"
 path = "src/lib.rs"
 
 [features]
-# Default build is offline & dependency-light: the bag-of-words embedder, no ONNX.
-# Production enables `fastembed` for real bge-small / MiniLM embeddings.
-default = []
+# Default build ships real bge-small / MiniLM embeddings via `fastembed` (ONNX;
+# the model downloads once at runtime, then offline). Build with
+# `--no-default-features` for the offline, dependency-light bag-of-words embedder
+# (no ONNX, no network) — used by the deterministic test/CI lane.
+default = ["fastembed"]
 fastembed = ["dep:fastembed"]
 
 [dependencies]

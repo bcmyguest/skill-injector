@@ -1,9 +1,10 @@
 //! Golden tests: real prompts must rank the right skill first.
 //!
-//! Runs against the self-contained fixture skills under `tests/fixtures/skills/`
-//! using the offline bag-of-words embedder (default build), so it's network-free
-//! and deterministic. With `--features fastembed` the same prompts should hold
-//! (and gain synonym tolerance); add semantic-only prompts there later.
+//! Runs against the self-contained fixture skills under `tests/fixtures/skills/`.
+//! Run with `--no-default-features` to use the offline bag-of-words embedder, so
+//! it's network-free and deterministic. The default `fastembed` build exercises
+//! the real bge embedder (model downloads on first run); the same prompts should
+//! hold (and gain synonym tolerance) — add semantic-only prompts there later.
 
 use ski::config::Config;
 use ski::embed::{self, EmbedKind};
