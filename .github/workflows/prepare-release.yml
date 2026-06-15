@@ -1,0 +1,90 @@
+name: Prepare release
+
+# Manual one-click release. Derives the next semver from Conventional Commits via
+# git-cliff (feat -> minor, fix -> patch, `!`/BREAKING -> major), bumps the three
+# version manifests + Cargo.lock in lockstep, commits + tags, then dispatches
+# release.yml to build and publish. No releasable commits since the last tag -> no-op.
+#
+# The pushed tag is created with GITHUB_TOKEN, which by design does NOT re-trigger
+# release.yml's `on: push: tags`; that's why this workflow dispatches release.yml
+# explicitly (allowed for workflow_dispatch with the default token).
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute the next version only — no commit/tag/release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: write # to dispatch release.yml
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Bump + tag + dispatch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-cliff needs full history + tags
+
+      - name: Compute next version (git-cliff)
+        id: cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --bumped-version
+
+      - name: Resolve + guard
+        id: ver
+        run: |
+          TAG="${{ steps.cliff.outputs.version }}"
+          VER="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Next version: $TAG"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::No releasable commits since the last tag ($TAG already exists)."
+            exit 1
+          fi
+
+      - name: Bump manifests
+        if: ${{ !inputs.dry_run }}
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          sed -i -E '0,/^version = "[^"]*"/s//version = "'"$V"'"/' Cargo.toml
+          tmp=$(mktemp); jq --arg v "$V" '.version = $v' .claude-plugin/plugin.json > "$tmp"; mv "$tmp" .claude-plugin/plugin.json
+          tmp=$(mktemp); jq --arg v "$V" '.metadata.version = $v' .claude-plugin/marketplace.json > "$tmp"; mv "$tmp" .claude-plugin/marketplace.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !inputs.dry_run }}
+      - name: Sync Cargo.lock
+        if: ${{ !inputs.dry_run }}
+        run: cargo update -p ski --precise "${{ steps.ver.outputs.version }}" --offline
+
+      - name: Verify lockstep
+        if: ${{ !inputs.dry_run }}
+        run: bash scripts/version-sync.sh "${{ steps.ver.outputs.tag }}"
+
+      - name: Commit + tag + push
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock .claude-plugin/plugin.json .claude-plugin/marketplace.json
+          git commit -m "chore(release): ${{ steps.ver.outputs.tag }}" \
+                     -m "Assisted-by: Claude:claude-opus-4-8"
+          git tag -a "${{ steps.ver.outputs.tag }}" -m "ski ${{ steps.ver.outputs.tag }}"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "${{ steps.ver.outputs.tag }}"
+
+      - name: Dispatch release build
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref "${{ steps.ver.outputs.tag }}" -f tag="${{ steps.ver.outputs.tag }}"
