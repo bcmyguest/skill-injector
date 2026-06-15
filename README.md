@@ -13,6 +13,34 @@ This repo is a single Rust binary (`ski`) plus the thin host adapters that drive
 packaged as a one-plugin Claude Code marketplace. See [PLAN.md](./PLAN.md) for the
 full design and [DEVELOPING.md](./DEVELOPING.md) for the dev workflow.
 
+## Benchmarks
+
+**100% local** — no API call, no token cost, nothing leaves your machine. The whole
+pipeline (embed → retrieve → rerank) runs on CPU in about **half a second per prompt**.
+Real samples, ranked against a live library of 57 skills:
+
+| your prompt | skill `ski` injects | rerank score |
+|---|---|---|
+| `set up a python project with uv` | `uv-setup` | 2.76 |
+| `scaffold a new react typescript frontend` | `react-ts-setup` | 3.38 |
+| `how do I credit Claude in this git commit` | `git-attribution` | 1.21 |
+| `make an animated gif for slack` | `slack-gif-creator` | 1.63 |
+| `open webui shows no models` | `debug-lemonade` | 1.41 |
+| `extract tables from a pdf` | `pdf` | 0.67 |
+
+That `open webui shows no models` → `debug-lemonade` hit shares **zero keywords** with the
+skill — it's pure semantic retrieval (cosine 0.69). Surface-token matching can't do that.
+
+| operation (cold — every hook is a fresh process) | time |
+|---|---|
+| rank + inject one prompt (`ski hook`) | **~0.54 s** median |
+| full index rebuild (57 skills) | ~0.78 s |
+| incremental reindex, no change | ~0.19 s |
+
+`bge-small-en-v1.5` (384-dim) retrieval + `jina-reranker-v1-turbo-en` rerank, ~270 MB RAM.
+Measured CPU-only on an AMD Ryzen AI MAX+ 395 — honest cold runs with model load included,
+not warm microbenchmarks. Reproduce with `ski index` then `ski why "<your prompt>"`.
+
 ## How it works
 
 ```
@@ -39,8 +67,16 @@ prompt ─▶ adapter (Claude hook / opencode plugin) ─▶ ski (Rust, one bina
 
 The plugin is hooks-only and needs the `ski` binary on disk.
 
-1. **Build the binary.** Default build = real embedder + reranker (downloads the
-   model once, then offline):
+1. **Get the binary.** Easiest — install the latest prebuilt release into
+   `~/.local/bin` (Linux x86_64):
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/bcmyguest/skill-injector/main/scripts/install.sh | sh
+   ```
+
+   `.deb` / `.rpm` packages are on the [Releases](https://github.com/bcmyguest/skill-injector/releases)
+   page too. Or build from source — default build = real embedder + reranker
+   (downloads the model once, then offline):
 
    ```sh
    cargo install --path .            # -> ~/.cargo/bin/ski
