@@ -51,7 +51,8 @@ the same order as the Claude adapter's `ski-bootstrap.sh`.
    }
    ```
 
-`ski init -g opencode` will automate both steps.
+`ski init -g opencode` does this for you — it writes the bundled plugin straight to
+`~/.config/opencode/plugin/ski.ts` (the first option above), no manual copy needed.
 
 ## Skill roots
 

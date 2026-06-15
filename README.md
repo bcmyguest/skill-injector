@@ -95,6 +95,11 @@ The plugin is hooks-only and needs the `ski` binary on disk.
    /plugin install skill-inject@skill-inject
    ```
 
+   **Can't use the marketplace?** `ski init -g claude` merges the same three hooks
+   straight into `~/.claude/settings.json` (backing up any existing file to
+   `settings.json.bak` first). It's additive and idempotent — it won't touch unrelated
+   settings or double-wire a hook already present.
+
 `hooks/hooks.json` wires three hooks through `scripts/ski-bootstrap.sh`, which resolves
 `ski` from `PATH`, then `~/.local/bin`, then `~/.cargo/bin`:
 
@@ -112,6 +117,7 @@ For **opencode**, see [opencode/README.md](./opencode/README.md).
 ## Usage
 
 ```sh
+ski init -g claude            # wire ski's hooks into ~/.claude/settings.json (or opencode)
 ski index                     # build the index at $XDG_DATA_HOME/ski/index.json
 ski why "credit Claude in this commit" --top 5   # ranked skills + scores (tuning aid)
 

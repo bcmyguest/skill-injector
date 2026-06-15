@@ -49,6 +49,24 @@ pub fn model_cache_dir() -> PathBuf {
     config_dir().join("models")
 }
 
+/// `~/.claude/settings.json` — Claude Code's user settings. `ski init --host
+/// claude` merges its hooks here, the marketplace-free install path for users
+/// who can't run `/plugin`.
+pub fn claude_settings_path() -> PathBuf {
+    home().join(".claude").join("settings.json")
+}
+
+/// opencode's global plugin directory (`$XDG_CONFIG_HOME/opencode/plugin`,
+/// default `~/.config/opencode/plugin`), where `ski init --host opencode` drops
+/// `ski.ts`.
+pub fn opencode_plugin_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"))
+        .join("opencode")
+        .join("plugin")
+}
+
 /// `$XDG_STATE_HOME/ski` (default `~/.local/state/ski`).
 pub fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")

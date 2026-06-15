@@ -7,7 +7,7 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::{self, Host};
 use ski::index::{self, Index};
-use ski::{observe, paths, rank, rerank, session_start, skill};
+use ski::{init, observe, paths, rank, rerank, session_start, skill};
 
 #[derive(Parser)]
 #[command(
@@ -57,6 +57,15 @@ enum Cmd {
         #[arg(long)]
         host: String,
     },
+    /// Install ski's hooks/plugin for a host into your user config (the
+    /// marketplace-free setup path).
+    Init {
+        /// Which host to set up ('claude' or 'opencode').
+        host: String,
+        /// Install user-wide (required; per-project install is not yet supported).
+        #[arg(short = 'g', long)]
+        global: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -73,6 +82,7 @@ fn main() -> Result<()> {
         Cmd::Hook { host } => hook::run(host.parse::<Host>()?),
         Cmd::Observe { host } => observe::run(host.parse::<Host>()?),
         Cmd::SessionStart { host } => session_start::run(host.parse::<Host>()?),
+        Cmd::Init { host, global } => init::run(host.parse::<Host>()?, global),
     }
 }
 
