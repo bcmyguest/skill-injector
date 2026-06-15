@@ -2,7 +2,16 @@
 # only fire when Rust sources change; everything else is unaffected. Requires
 # cargo on PATH (rustup). The hooks pin `--no-default-features` to stay offline
 # (no model download); the default `fastembed` lane runs in CI for the real embedder.
+# `default_install_hook_types` makes a plain `pre-commit install` wire BOTH the
+# pre-commit stage (fmt/clippy/test below) and the commit-msg stage (Conventional
+# Commits check) — the latter keeps subjects machine-parseable for release notes.
+default_install_hook_types: [pre-commit, commit-msg]
 repos:
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
   - repo: local
     hooks:
       - id: ski-fmt
