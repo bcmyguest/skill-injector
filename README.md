@@ -32,15 +32,14 @@ output against a live library of 57 skills (reproduce with `ski index` then
 `ski why "<prompt>"`):
 
 ```text
-$ ski why "open webui shows no models"
-  debug-lemonade    1.41   <- injected (clear winner)
-  frontend-design  -3.28   <- skipped
+$ ski why "clean up this messy CSV"
+  xlsx              -0.59   <- injected (clear winner)
+  pre-commit-setup  -3.72   <- skipped
 ```
 
-`open webui shows no models` shares **zero words** with `debug-lemonade` — the match is
-on *meaning*, not vocabulary, and it lands far ahead of every other skill. Keyword or
-description matching can't bridge that gap, and a model scanning 57 descriptions can
-easily miss it.
+`clean up this messy CSV` never says *spreadsheet* or *xlsx* — the match is on *meaning*,
+not vocabulary, and it lands far ahead of every other skill. Keyword or description
+matching can't bridge that gap, and a model scanning 57 descriptions can easily miss it.
 
 ```text
 $ ski why "what time is the meeting tomorrow"
@@ -51,14 +50,14 @@ An off-topic prompt leaves every skill under the cutoff, so `ski` injects nothin
 false positives, no context pollution.
 
 This repo is a single Rust binary (`ski`) plus the thin host adapters that drive it,
-packaged as a one-plugin Claude Code marketplace. See [PLAN.md](./PLAN.md) for the
-full design and [DEVELOPING.md](./DEVELOPING.md) for the dev workflow.
+packaged as a one-plugin Claude Code marketplace. See [DEVELOPING.md](./DEVELOPING.md)
+for the dev workflow.
 
 ## Benchmarks
 
 **100% local** — no API call, no token cost, nothing leaves your machine. The whole
-pipeline (embed → retrieve → rerank) runs on CPU in about **half a second per prompt**.
-Real samples, ranked against a live library of 57 skills:
+pipeline (embed → retrieve → rerank) runs on CPU — around **half a second per prompt** on
+the machine benchmarked below. Real samples, ranked against a live library of 57 skills:
 
 | your prompt | skill `ski` injects | match score |
 |---|---|---|
@@ -66,7 +65,7 @@ Real samples, ranked against a live library of 57 skills:
 | `scaffold a new react typescript frontend` | `react-ts-setup` | 3.38 |
 | `how do I credit Claude in this git commit` | `git-attribution` | 1.21 |
 | `make an animated gif for slack` | `slack-gif-creator` | 1.63 |
-| `open webui shows no models` | `debug-lemonade` | 1.41 |
+| `write a Word doc with a table of contents` | `docx` | 0.12 |
 | `extract tables from a pdf` | `pdf` | 0.67 |
 
 Every row is a real `ski why` result. A higher **match score** means a stronger match;
@@ -79,7 +78,7 @@ anything below `-2.50` is left out entirely (as in the off-topic example above).
 | incremental reindex, no change | ~0.19 s |
 
 `bge-small-en-v1.5` (384-dim) retrieval + `jina-reranker-v1-turbo-en` rerank, ~270 MB RAM.
-Measured CPU-only on an AMD Ryzen AI MAX+ 395 — honest cold runs with model load included,
+Measured CPU-only on an AMD Ryzen AI MAX+ 395 — cold runs with model load included,
 not warm microbenchmarks. Reproduce with `ski index` then `ski why "<your prompt>"`.
 
 ## How it works
@@ -98,7 +97,7 @@ prompt ─▶ adapter (Claude hook / opencode plugin) ─▶ ski (Rust, one bina
 - **Two-stage ranking.** A bge-small bi-encoder retrieves a candidate set; a JINA-turbo
   cross-encoder reranks it. Cheap O(1) query + cached vectors first, expensive pairwise
   scoring only on the short list. (Why not reranker-only: it's O(N) per prompt and loses
-  the cosine early-out — see PLAN.md.)
+  the cosine early-out.)
 - **Per-session dedup.** A skill injected by `ski` *or* loaded by the model itself is
   recorded in a session ledger and never re-injected — until compaction re-arms it.
 - **Fail-open everywhere.** Bad stdin, a missing index, any IO error → no output, exit 0.
