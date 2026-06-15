@@ -33,21 +33,25 @@ jobs:
         with:
           fetch-depth: 0 # git-cliff needs full history + tags
 
-      - name: Compute next version (git-cliff)
-        id: cliff
-        uses: orhun/git-cliff-action@v4
+      # The git-cliff-action `version` output is the latest *existing* release, not
+      # the computed next one, so install git-cliff and read `--bumped-version` from
+      # stdout directly (the documented pattern).
+      - name: Install git-cliff
+        uses: taiki-e/install-action@v2
         with:
-          config: cliff.toml
-          args: --bumped-version
+          tool: git-cliff
 
-      - name: Resolve + guard
+      - name: Compute next version + guard
         id: ver
         run: |
-          TAG="${{ steps.cliff.outputs.version }}"
+          TAG="$(git-cliff --config cliff.toml --bumped-version)"
           VER="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Next version: $TAG"
+          if [ -z "$TAG" ]; then
+            echo "::error::git-cliff returned an empty version."; exit 1
+          fi
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
             echo "::error::No releasable commits since the last tag ($TAG already exists)."
             exit 1
