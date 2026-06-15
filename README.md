@@ -124,6 +124,8 @@ echo '{"session_id":"s1","cwd":".","prompt":"set up a python project"}' \
 
 The dedup ledger lives at `$XDG_STATE_HOME/ski/sessions/<session_id>.json`. The index is
 per-host (Claude `index.json`, opencode `index-opencode.json`) so the two never clobber.
+Downloaded embedder/reranker models cache once at `$XDG_CONFIG_HOME/ski/models` (default
+`~/.config/ski/models`) — never in the working directory.
 `SKI_ROOTS` (colon-separated) overrides the skill-discovery roots for both hosts.
 
 ## Embedding backends
@@ -131,7 +133,8 @@ per-host (Claude `index.json`, opencode `index-opencode.json`) so the two never 
 - **Default (`fastembed`):** real embeddings via fastembed (ONNX). Retrieval with
   `bge-small-en-v1.5` (the query gets bge's retrieval-instruction prefix; descriptions
   don't), reranking with JINA turbo. `all-MiniLM-L6-v2-q` is the low-RAM alternative.
-  Models download once and cache.
+  Models download once and cache at `$XDG_CONFIG_HOME/ski/models` (default
+  `~/.config/ski/models`).
 - **`--no-default-features` (offline):** deterministic hashed bag-of-words. No deps, no
   network, no model — surface-token matching plus the keyword boost. Used for tests and
   as the fallback when no recognized model is configured.

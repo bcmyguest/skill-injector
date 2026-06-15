@@ -105,6 +105,7 @@ mod fast {
                 // -base on both top-1 accuracy and latency (266ms vs 2.8s load).
                 TextRerank::try_new(
                     RerankInitOptions::new(RerankerModel::JINARerankerV1TurboEn)
+                        .with_cache_dir(crate::paths::model_cache_dir())
                         .with_show_download_progress(false),
                 )
                 .ok()

@@ -32,6 +32,23 @@ pub fn index_path(host: Host) -> PathBuf {
     data_dir().join(name)
 }
 
+/// `$XDG_CONFIG_HOME/ski` (default `~/.config/ski`). Home for the downloaded
+/// fastembed model cache, so the ONNX models are kept once per user instead of
+/// dropping a `.fastembed_cache` into whatever directory the hook happens to run
+/// from (commonly a git work tree).
+pub fn config_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"))
+        .join("ski")
+}
+
+/// Cache directory for downloaded embedding/reranker model files, passed to
+/// fastembed's `with_cache_dir`. Lives under [`config_dir`].
+pub fn model_cache_dir() -> PathBuf {
+    config_dir().join("models")
+}
+
 /// `$XDG_STATE_HOME/ski` (default `~/.local/state/ski`).
 pub fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")

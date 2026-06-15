@@ -24,7 +24,9 @@ impl FastEmbedder {
             "all-MiniLM-L6-v2" => (EmbeddingModel::AllMiniLML6V2, false),
             _ => return Ok(None),
         };
-        let te = TextEmbedding::try_new(InitOptions::new(em))?;
+        let te = TextEmbedding::try_new(
+            InitOptions::new(em).with_cache_dir(crate::paths::model_cache_dir()),
+        )?;
         Ok(Some(Self {
             model: te,
             tag: model.to_string(),
