@@ -1,6 +1,6 @@
 [package]
 name = "ski"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 description = "skill-inject: local semantic auto-injection of agent skills"
 license = "MIT"
