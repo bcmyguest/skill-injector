@@ -32,7 +32,7 @@ jobs:
         run: bash scripts/version-sync.sh "${{ inputs.tag || github.ref_name }}"
 
   build:
-    name: Build ${{ env.TARGET }}
+    name: Build x86_64-unknown-linux-gnu
     needs: version-sync
     runs-on: ubuntu-latest
     steps:
