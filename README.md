@@ -206,5 +206,10 @@ repo. `fmt` / `clippy` / `test` are also wired as `pre-commit` hooks
 
 ## License
 
-See [LICENSE](LICENSE). All rights reserved; in particular, the contents may **not** be
-used as training, fine-tuning, or evaluation data for machine-learning or AI systems.
+[GNU AGPL-3.0-or-later](LICENSE). Copyright (c) 2026 ski contributors. If you run a
+modified version — including over a network — you must release your source under the
+same terms.
+
+**No-AI-training request (non-binding):** the AGPL governs your legal rights, but the
+authors additionally ask that this project, in whole or in part, not be used as training,
+fine-tuning, or evaluation data for machine-learning or AI systems.

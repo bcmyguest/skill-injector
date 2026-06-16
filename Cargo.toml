@@ -3,7 +3,7 @@ name = "ski"
 version = "0.2.0"
 edition = "2021"
 description = "skill-inject: local semantic auto-injection of agent skills"
-license = "MIT"
+license = "AGPL-3.0-or-later"
 
 [[bin]]
 name = "ski"
@@ -43,7 +43,7 @@ strip = true
 # statically linked into `ski`, so the package only carries the one binary plus
 # docs. The bge model + reranker still download on first run (needs network).
 [package.metadata.deb]
-maintainer = "Brandon Guest <bguest95@gmail.com>"
+maintainer = "ski contributors"
 section = "utils"
 priority = "optional"
 extended-description = """\

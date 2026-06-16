@@ -1,7 +1,7 @@
 {
   "name": "skill-inject",
   "owner": {
-    "name": "Brandon Guest"
+    "name": "ski contributors"
   },
   "metadata": {
     "description": "Local, model-agnostic automatic skill injection for Claude Code and opencode",
