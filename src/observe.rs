@@ -53,6 +53,8 @@ fn observe(host: Host) -> anyhow::Result<()> {
     if ev.session_id.is_empty() {
         return Ok(());
     }
+    // config.toml can enable telemetry (or the env var) for `use` events too.
+    telemetry::init(crate::config::Config::load(host).0.telemetry);
 
     let idx = Index::load(&paths::index_path(host)).ok().flatten();
     let Some(id) = skill_id_for(idx.as_ref(), &ev.tool_name, &ev.tool_input) else {

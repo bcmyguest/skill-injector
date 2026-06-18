@@ -169,13 +169,17 @@ char_budget = 6000          # max total injected characters
 
 # Reranker gate — JINA cross-encoder logits, where ~0 is the relevant/irrelevant
 # boundary. Raise toward 0 to inject less; lower to inject more.
-rerank_min = -2.5
+rerank_min = -1.5
+
+# Opt-in JSONL telemetry (recommend/use events) for `ski history`; off by default.
+# Equivalent to setting the SKI_TELEMETRY env var.
+telemetry = false
 
 # Stage-1 cosine thresholds. Normally left to per-embedder calibration; pin to override.
 # min_similarity = 0.30
 # score_margin   = 0.15
 
-# model              = "bge-small-en-v1.5"   # or "all-MiniLM-L6-v2-q"
+# model              = "bge-small-en-v1.5"   # the default; alts: "all-MiniLM-L6-v2-q", "bge-base-en-v1.5"
 # inject_mode        = "directive"           # or "body"
 # directive_strength = "auto"                # auto | soft | hard
 # roots              = ["/abs/path/to/skills"]  # discovery roots; not tilde-expanded,

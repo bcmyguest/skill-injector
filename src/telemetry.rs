@@ -1,7 +1,9 @@
 //! Opt-in JSONL event log for debugging and calibration. **Disabled by default**
-//! — every entry point short-circuits unless `SKI_TELEMETRY` is truthy
-//! (`1|true|yes|on`), set in the hook's environment (e.g. the `env` block of
-//! `~/.claude/settings.json`).
+//! — every entry point short-circuits unless telemetry is enabled, via either
+//! `telemetry = true` in `~/.config/ski/config.toml` or a truthy `SKI_TELEMETRY`
+//! env var (`1|true|yes|on`, e.g. in the `env` block of `~/.claude/settings.json`).
+//! Each entry point calls [`init`] right after `Config::load` to reflect the
+//! config flag into the process; [`enabled`] is then config-OR-env.
 //!
 //! Two event kinds, appended one JSON object per line to
 //! `$XDG_STATE_HOME/ski/telemetry.jsonl`:
@@ -21,13 +23,27 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Set from the loaded `Config` (`telemetry = true` in `config.toml`) by each
+/// entry point before it records anything. Lets the config file enable telemetry
+/// without an env var; the env var still works on its own for the hook's `env`
+/// block. Defaults to off until [`init`] runs.
+static CONFIG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Reflect `cfg.telemetry` into the process so [`enabled`] sees it. Call once,
+/// right after `Config::load`, in any entry point that may record events.
+pub fn init(config_enabled: bool) {
+    CONFIG_ENABLED.store(config_enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Whether the event log is active. Cheap; called at every entry point so a
-/// disabled log costs one env lookup and nothing else.
+/// disabled log costs one env lookup and nothing else. On when the config flag
+/// (via [`init`]) *or* a truthy `SKI_TELEMETRY` env var is set.
 pub fn enabled() -> bool {
-    matches!(
-        std::env::var("SKI_TELEMETRY").ok().as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
+    CONFIG_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        || matches!(
+            std::env::var("SKI_TELEMETRY").ok().as_deref(),
+            Some("1") | Some("true") | Some("yes") | Some("on")
+        )
 }
 
 /// Record an injection: the candidates that cleared the gate (`recs`) and the

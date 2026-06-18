@@ -76,6 +76,11 @@ pub struct Config {
     pub rerank_min: f32,
     /// Max reranker-logit gap below the best reranked skill for a peer to ride along.
     pub rerank_margin: f32,
+
+    /// Append opt-in JSONL telemetry events (see [`crate::telemetry`]). Off by
+    /// default. Enabled by this field *or* a truthy `SKI_TELEMETRY` env var —
+    /// either one turns it on, so the env var still works without a config file.
+    pub telemetry: bool,
 }
 
 impl Config {
@@ -152,6 +157,7 @@ impl Config {
             rerank_top_k: 12,
             rerank_min: -1.5,
             rerank_margin: 2.0,
+            telemetry: false,
         }
     }
 }
@@ -189,6 +195,7 @@ pub struct FileConfig {
     pub rerank_top_k: Option<usize>,
     pub rerank_min: Option<f32>,
     pub rerank_margin: Option<f32>,
+    pub telemetry: Option<bool>,
 }
 
 impl FileConfig {
@@ -258,6 +265,9 @@ impl FileConfig {
         }
         if let Some(v) = self.rerank_margin {
             cfg.rerank_margin = v;
+        }
+        if let Some(v) = self.telemetry {
+            cfg.telemetry = v;
         }
     }
 
@@ -443,17 +453,20 @@ mod tests {
             deny = ["noisy-skill"]
             inject_mode = "body"
             directive_strength = "hard"
+            telemetry = true
         "#;
         let file = FileConfig::parse(raw).unwrap();
         let mut cfg = Config::default();
         let (orig_model, orig_budget) = (cfg.model.clone(), cfg.char_budget);
+        assert!(!cfg.telemetry); // off by default
         file.apply(&mut cfg);
         assert_eq!(cfg.max_skills, 5);
         assert_eq!(cfg.rerank_min, -0.5);
         assert_eq!(cfg.deny, ["noisy-skill"]);
         assert_eq!(cfg.inject_mode, InjectMode::Body);
         assert_eq!(cfg.directive_strength, Strength::Hard);
-        // Untouched fields keep their defaults.
+        assert!(cfg.telemetry); // enabled via config.toml
+                                // Untouched fields keep their defaults.
         assert_eq!(cfg.model, orig_model);
         assert_eq!(cfg.char_budget, orig_budget);
     }
