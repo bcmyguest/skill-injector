@@ -95,6 +95,14 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
 
     let session_path = paths::session_path(&event.session_id);
     let mut session = Session::load(&session_path);
+    // With telemetry on, remember the active prompt now (before any early return)
+    // so a self-load later in this conversation — including after a prompt that
+    // injected nothing — can be tied back to it as a recall miss. One extra write
+    // per prompt, paid only by telemetry users.
+    if telemetry::enabled() {
+        session.last_prompt = event.prompt.clone();
+        let _ = session.save(&session_path);
+    }
     // Stage 2: when stage-1 is ambiguous, let the cross-encoder decide; otherwise
     // (confident winner or nothing relevant) keep the cheap stage-1 result. The
     // stage that wins also sets which confidence mapping the recs carry.

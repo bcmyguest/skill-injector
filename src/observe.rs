@@ -71,7 +71,9 @@ fn observe(host: Host) -> anyhow::Result<()> {
     } else {
         "skill"
     };
-    telemetry::record_use(&ev.session_id, &id, via);
+    // The hook stashed the active prompt here (telemetry-on only); pass it through
+    // so a recall miss is tied to the call that triggered the self-load.
+    telemetry::record_use(&ev.session_id, &id, via, &session.last_prompt);
     Ok(())
 }
 

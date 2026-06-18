@@ -68,6 +68,13 @@ pub struct Session {
     /// skill id -> how it got into context (and at what confidence).
     #[serde(default)]
     pub loaded: BTreeMap<String, Record>,
+    /// The most recent user prompt in this conversation. Stashed by the hook
+    /// **only when telemetry is on**, so a later self-load seen by `ski observe`
+    /// (a recall miss — the model loaded a skill we never recommended) can be
+    /// tied back to the prompt that was active. Empty otherwise; never serialized
+    /// when empty, so the non-telemetry hot path leaves the file unchanged.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_prompt: String,
     /// Unix seconds of the last write (diagnostics only).
     #[serde(default)]
     pub updated: u64,

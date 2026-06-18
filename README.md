@@ -141,7 +141,8 @@ ski why "credit Claude in this commit" --top 5   # ranked skills + scores (tunin
 
 # Telemetry readout (needs telemetry = true, or SKI_TELEMETRY=1, while hooks ran):
 ski history                   # aggregate: recommended vs. actually-used, top false positives/misses
-ski history --tail 20         # the last 20 calls individually: prompt, per-candidate confidence, used?
+ski history --tail 20         # last 20 events interleaved: recommendations (prompt + per-candidate
+                              #   confidence + used?) and self-loads (acted-on-rec vs. RECALL MISS + prompt)
 ski history --tail 20 --session conv-abc   # ...filtered to one conversation
 ski clear                     # re-arm injection (wipe per-session dedup); --telemetry also wipes the log
 

@@ -78,18 +78,24 @@ pub fn record_recommend(
 }
 
 /// Record that the model loaded `skill_id` itself. `via` is `"skill"` (the
-/// `Skill` tool) or `"read"` (opened the `SKILL.md`).
-pub fn record_use(session_id: &str, skill_id: &str, via: &str) {
+/// `Skill` tool) or `"read"` (opened the `SKILL.md`). `prompt` is the active
+/// prompt the hook stashed in session state (empty if none), letting `ski
+/// history` tie a recall miss back to the call that triggered it.
+pub fn record_use(session_id: &str, skill_id: &str, via: &str, prompt: &str) {
     if !enabled() {
         return;
     }
-    append(&json!({
+    let mut ev = json!({
         "ts": now_ms(),
         "kind": "use",
         "session": session_id,
         "skill": skill_id,
         "via": via,
-    }));
+    });
+    if !prompt.is_empty() {
+        ev["prompt"] = json!(prompt);
+    }
+    append(&ev);
 }
 
 fn append(ev: &serde_json::Value) {
@@ -128,7 +134,7 @@ mod tests {
         std::env::remove_var("SKI_TELEMETRY");
         assert!(!enabled());
         // record_* must be no-ops when disabled (no panic, no file).
-        record_use("s", "pdf", "skill");
+        record_use("s", "pdf", "skill", "");
     }
 
     #[test]

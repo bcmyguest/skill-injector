@@ -51,6 +51,18 @@ pub struct RecEvent {
     pub injected: Vec<Cand>,
 }
 
+/// A single `use` event (the model loaded a skill itself), for the `--tail`
+/// listing. `prompt` is the call that was active when it loaded, if telemetry
+/// captured it (empty otherwise).
+#[derive(Debug, PartialEq)]
+pub struct UseEvent {
+    pub ts: u128,
+    pub session: String,
+    pub skill: String,
+    pub via: String,
+    pub prompt: String,
+}
+
 /// Parse every `recommend` event in log order (oldest first), keeping full
 /// per-event detail. Pure; the listing view joins these against [`used_by_session`].
 pub fn recommend_events(log: &str) -> Vec<RecEvent> {
@@ -96,6 +108,45 @@ pub fn used_by_session(log: &str) -> BTreeMap<String, BTreeSet<String>> {
         }
     }
     used
+}
+
+/// Parse every `use` event in log order (oldest first), keeping the prompt for
+/// the listing. Pure.
+pub fn use_events(log: &str) -> Vec<UseEvent> {
+    let mut out = Vec::new();
+    for line in log.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("kind").and_then(|k| k.as_str()) != Some("use") {
+            continue;
+        }
+        let Some(skill) = v.get("skill").and_then(|s| s.as_str()) else {
+            continue;
+        };
+        out.push(UseEvent {
+            ts: v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0) as u128,
+            session: str_field(&v, "session"),
+            skill: skill.to_string(),
+            via: str_field(&v, "via"),
+            prompt: str_field(&v, "prompt"),
+        });
+    }
+    out
+}
+
+/// Per-session set of skill ids that were injected (from `recommend` events), so
+/// the listing can label a `use` as acting on a recommendation vs. a recall miss.
+/// Pure.
+pub fn recommended_by_session(log: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut rec: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for e in recommend_events(log) {
+        let entry = rec.entry(e.session).or_default();
+        for c in e.injected {
+            entry.insert(c.id);
+        }
+    }
+    rec
 }
 
 fn str_field(v: &serde_json::Value, key: &str) -> String {
@@ -206,44 +257,90 @@ pub fn run(tail: Option<usize>, session: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Render the last `n` recommendation events with full per-call detail.
+/// One entry in the merged per-call timeline: a recommendation we made, or a
+/// skill the model loaded itself.
+enum Ev<'a> {
+    Rec(&'a RecEvent),
+    Use(&'a UseEvent),
+}
+
+impl Ev<'_> {
+    fn ts(&self) -> u128 {
+        match self {
+            Ev::Rec(e) => e.ts,
+            Ev::Use(u) => u.ts,
+        }
+    }
+}
+
+/// Render the last `n` events (recommendations and self-loads, interleaved by
+/// time) with full per-call detail.
 fn print_events(log: &str, n: usize, session_filter: Option<&str>) {
     let used = used_by_session(log);
-    let mut events = recommend_events(log);
-    if let Some(sf) = session_filter {
-        events.retain(|e| e.session.contains(sf));
-    }
-    if events.is_empty() {
-        println!("no recommendation events");
+    let recd = recommended_by_session(log);
+    let recs = recommend_events(log);
+    let uses = use_events(log);
+    let keep = |s: &str| session_filter.is_none_or(|sf| s.contains(sf));
+
+    let mut timeline: Vec<Ev> = recs
+        .iter()
+        .filter(|e| keep(&e.session))
+        .map(Ev::Rec)
+        .chain(uses.iter().filter(|u| keep(&u.session)).map(Ev::Use))
+        .collect();
+    // Stable sort keeps a recommend before a same-millisecond use of it.
+    timeline.sort_by_key(Ev::ts);
+
+    if timeline.is_empty() {
+        println!("no events");
         return;
     }
-    let total = events.len();
+    let total = timeline.len();
     let start = total.saturating_sub(n);
-    println!("showing {} of {total} recommendation events", total - start);
+    println!("showing {} of {total} events", total - start);
     let now = now_ms();
     let empty = BTreeSet::new();
-    for e in &events[start..] {
-        let used_here = used.get(&e.session).unwrap_or(&empty);
-        let injected_ids: BTreeSet<&str> = e.injected.iter().map(|c| c.id.as_str()).collect();
-        println!(
-            "\n{}  session {}  stage {}",
-            ago(e.ts, now),
-            short(&e.session),
-            if e.stage.is_empty() { "?" } else { &e.stage },
-        );
-        println!("  prompt: {}", truncate(&e.prompt, 120));
-        for c in &e.injected {
-            let mark = if used_here.contains(&c.id) {
-                "used"
-            } else {
-                "unused"
-            };
-            println!("  -> {:<26} {:.2}  {mark}", c.id, c.confidence);
-        }
-        // Candidates that cleared the gate but lost to the char budget.
-        for c in &e.candidates {
-            if !injected_ids.contains(c.id.as_str()) {
-                println!("     {:<26} {:.2}  (over budget)", c.id, c.confidence);
+    for ev in &timeline[start..] {
+        match ev {
+            Ev::Rec(e) => {
+                let used_here = used.get(&e.session).unwrap_or(&empty);
+                let injected_ids: BTreeSet<&str> =
+                    e.injected.iter().map(|c| c.id.as_str()).collect();
+                println!(
+                    "\n{}  session {}  rec  stage {}",
+                    ago(e.ts, now),
+                    short(&e.session),
+                    if e.stage.is_empty() { "?" } else { &e.stage },
+                );
+                println!("  prompt: {}", truncate(&e.prompt, 120));
+                for c in &e.injected {
+                    let mark = if used_here.contains(&c.id) {
+                        "used"
+                    } else {
+                        "unused"
+                    };
+                    println!("  -> {:<26} {:.2}  {mark}", c.id, c.confidence);
+                }
+                // Candidates that cleared the gate but lost to the char budget.
+                for c in &e.candidates {
+                    if !injected_ids.contains(c.id.as_str()) {
+                        println!("     {:<26} {:.2}  (over budget)", c.id, c.confidence);
+                    }
+                }
+            }
+            Ev::Use(u) => {
+                let acted = recd.get(&u.session).is_some_and(|s| s.contains(&u.skill));
+                let tag = if acted { "acted on rec" } else { "RECALL MISS" };
+                println!(
+                    "\n{}  session {}  use  {} via {} ({tag})",
+                    ago(u.ts, now),
+                    short(&u.session),
+                    u.skill,
+                    u.via,
+                );
+                if !u.prompt.is_empty() {
+                    println!("  prompt: {}", truncate(&u.prompt, 120));
+                }
             }
         }
     }
@@ -432,6 +529,29 @@ garbage
         let used = used_by_session(DETAIL_LOG);
         assert!(used.get("sess-abcdef-1").unwrap().contains("pdf"));
         assert!(!used.contains_key("other-2"));
+    }
+
+    #[test]
+    fn use_events_parse_prompt_when_present() {
+        let log = r#"
+{"ts":5000,"kind":"use","session":"s1","skill":"xlsx","via":"read","prompt":"clean this csv"}
+{"ts":6000,"kind":"use","session":"s1","skill":"pdf","via":"skill"}
+"#;
+        let evs = use_events(log);
+        assert_eq!(evs.len(), 2);
+        assert_eq!(evs[0].skill, "xlsx");
+        assert_eq!(evs[0].via, "read");
+        assert_eq!(evs[0].prompt, "clean this csv");
+        assert_eq!(evs[1].prompt, ""); // no prompt field -> empty
+    }
+
+    #[test]
+    fn recommended_by_session_uses_injected_ids() {
+        let recd = recommended_by_session(DETAIL_LOG);
+        assert!(recd.get("sess-abcdef-1").unwrap().contains("pdf"));
+        // docx cleared the gate but only pdf was injected in this fixture.
+        assert!(!recd.get("sess-abcdef-1").unwrap().contains("docx"));
+        assert!(recd.get("other-2").unwrap().contains("xlsx"));
     }
 
     #[test]
