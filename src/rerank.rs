@@ -74,13 +74,29 @@ pub fn rerank(hits: &[Hit], idx: &Index, prompt: &str, cfg: &Config) -> Option<V
 /// or above `rerank_min` and within `rerank_margin` of the best reranked score.
 /// Returns hits sorted by descending reranked score (input order is preserved as
 /// it already is). The caller still applies deny/session/cap.
+///
+/// **Stage-1 agreement.** Before the reranker thresholds, a candidate must also
+/// have cleared the bi-encoder's own injection floor (`min_similarity`, on the
+/// preserved stage-1 `cosine + keyword`; [`rerank`] only overwrites `score` with
+/// the logit). The cross-encoder's job is to reorder and confirm the *retrieved*
+/// relevant set, not to resurrect a skill stage-1 judged irrelevant. Without this
+/// gate a prompt with no real match — "implement the builder pattern in Java",
+/// "RSA key generation from scratch" — lets the reranker pull a sub-floor skill to
+/// the top and inject noise; the logits there interleave with genuine weak matches
+/// (so no `rerank_min` value separates them), but their stage-1 scores do not.
 pub fn passes(reranked: &[Hit], cfg: &Config) -> Vec<Hit> {
-    let best = reranked
+    // Keep only candidates stage-1 also rated relevant; the best *eligible* logit
+    // then anchors the relative margin (a sub-floor leader can't drag peers in).
+    let eligible: Vec<&Hit> = reranked
+        .iter()
+        .filter(|h| h.cosine + h.keyword >= cfg.min_similarity)
+        .collect();
+    let best = eligible
         .first()
         .map(|h| h.score)
         .unwrap_or(f32::NEG_INFINITY);
-    reranked
-        .iter()
+    eligible
+        .into_iter()
         .filter(|h| h.score >= cfg.rerank_min && h.score >= best - cfg.rerank_margin)
         .cloned()
         .collect()
@@ -170,6 +186,8 @@ mod tests {
         }
     }
 
+    /// For `is_ambiguous` tests, which read `cosine`: model a hit whose cosine is
+    /// its score (no keyword boost).
     fn hit(id: &str, score: f32) -> Hit {
         Hit {
             id: id.to_string(),
@@ -177,6 +195,18 @@ mod tests {
             cosine: score,
             keyword: 0.0,
             score,
+        }
+    }
+
+    /// For `passes` tests, which gate on the reranker *logit* (`score`) while the
+    /// new stage-1-agreement filter reads `cosine`: keep them independent.
+    fn rhit(id: &str, logit: f32, cosine: f32) -> Hit {
+        Hit {
+            id: id.to_string(),
+            name: id.to_string(),
+            cosine,
+            keyword: 0.0,
+            score: logit,
         }
     }
 
@@ -211,8 +241,14 @@ mod tests {
 
     #[test]
     fn passes_keeps_top_and_rejects_negatives() {
-        // Reranker scale: a strong match, a co-relevant peer, and noise.
-        let reranked = vec![hit("a", 1.10), hit("b", -0.30), hit("c", -3.90)];
+        // Reranker scale: a strong match, a co-relevant peer, and noise. All three
+        // cleared stage-1 (cosine above the 0.30 default floor), so only the logit
+        // gates apply.
+        let reranked = vec![
+            rhit("a", 1.10, 0.80),
+            rhit("b", -0.30, 0.70),
+            rhit("c", -3.90, 0.65),
+        ];
         let got: Vec<String> = passes(&reranked, &cfg())
             .into_iter()
             .map(|h| h.id)
@@ -222,7 +258,32 @@ mod tests {
 
     #[test]
     fn passes_drops_all_when_best_is_noise() {
-        let reranked = vec![hit("a", -2.83), hit("b", -3.94)];
+        let reranked = vec![rhit("a", -2.83, 0.70), rhit("b", -3.94, 0.66)];
         assert!(passes(&reranked, &cfg()).is_empty()); // negative prompt -> nothing
+    }
+
+    #[test]
+    fn passes_rejects_subfloor_stage1_resurrection() {
+        // The reranker pulled a skill to the top (high logit) that stage-1 scored
+        // below its injection floor (cosine 0.20 < 0.30): it must not be injected,
+        // even though its logit clears `rerank_min`. This is the over-injection the
+        // builder-pattern / RSA negatives produced.
+        let reranked = vec![rhit("ghost", 1.50, 0.20), rhit("real", 0.40, 0.72)];
+        let got: Vec<String> = passes(&reranked, &cfg())
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(got, ["real"]); // ghost dropped on stage-1 disagreement
+    }
+
+    #[test]
+    fn passes_subfloor_leader_does_not_drag_in_peers() {
+        // A sub-floor leader is dropped, and the relative margin is then anchored on
+        // the best *eligible* skill — a trailing real skill outside the leader's
+        // margin is still judged on its own.
+        let cfg = cfg(); // rerank_margin 2.0
+        let reranked = vec![rhit("ghost", 2.00, 0.20), rhit("real", -0.40, 0.72)];
+        let got: Vec<String> = passes(&reranked, &cfg).into_iter().map(|h| h.id).collect();
+        assert_eq!(got, ["real"]); // kept: -0.40 >= rerank_min, anchors its own margin
     }
 }

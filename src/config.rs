@@ -151,6 +151,15 @@ impl Config {
             // <= -1.6, so -1.5 cuts false injections ~80% (5 -> 1 on the corpus)
             // with zero top-1 loss (19/19 positives kept). Larger embedders/rerankers
             // (bge-base, jina-v2) tie this at higher cost, so the gate is the lever.
+            //
+            // `rerank_min` alone can't catch every false inject: on a richer corpus
+            // a no-match prompt's reranked logit interleaves with genuine weak
+            // matches, so no scalar separates them. The complementary lever is the
+            // stage-1 *agreement* gate in `rerank::passes` — a reranked skill must
+            // also clear `min_similarity` on its bi-encoder score, i.e. the reranker
+            // may reorder the retrieved-relevant set but not resurrect a skill stage-1
+            // judged irrelevant. That cut false injects a further ~67% (3 -> 1 on the
+            // 52-negative realistic corpus) at no extra compute. See `examples/eval`.
             recall_floor: 0.50,
             high_conf: 2.0,
             clear_gap: 0.12,

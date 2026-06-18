@@ -146,19 +146,40 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
 
     // Mirror the hook's decision so `why` (and the eval that drives it) reflects
     // the real pipeline: stage-1 cosine, or stage-2 reranker logits when the gate
-    // fires. The `*` mark means the row cleared the threshold for whichever stage
-    // produced it.
-    let (rows, threshold, stage) = match rerank::is_ambiguous(&hits, &cfg)
+    // fires. A `*` marks a row that would actually inject — for reranked rows that
+    // means clearing `passes` (reranker thresholds *and* stage-1 agreement), not
+    // just `rerank_min`, so a sub-floor skill the reranker pulled up shows unstarred.
+    let (rows, threshold, stage, injectable) = match rerank::is_ambiguous(&hits, &cfg)
         .then(|| rerank::rerank(&hits, &idx, prompt, &cfg))
         .flatten()
     {
-        Some(reranked) => (reranked, cfg.rerank_min, "rerank:turbo".to_string()),
-        None => (hits, cfg.min_similarity, format!("stage1:{}", idx.model)),
+        Some(reranked) => {
+            let ids: std::collections::HashSet<String> = rerank::passes(&reranked, &cfg)
+                .into_iter()
+                .map(|h| h.id)
+                .collect();
+            (
+                reranked,
+                cfg.rerank_min,
+                "rerank:turbo".to_string(),
+                Some(ids),
+            )
+        }
+        None => (
+            hits,
+            cfg.min_similarity,
+            format!("stage1:{}", idx.model),
+            None,
+        ),
     };
 
     println!("stage {stage}  threshold {threshold:.2}  prompt: {prompt:?}");
     for h in rows.iter().take(top) {
-        let mark = if h.score >= threshold { "*" } else { " " };
+        let starred = match &injectable {
+            Some(ids) => ids.contains(&h.id),
+            None => h.score >= threshold,
+        };
+        let mark = if starred { "*" } else { " " };
         println!(
             "{mark} {:<26} score {:.3}  (cos {:.3} + kw {:.3})",
             h.name, h.score, h.cosine, h.keyword

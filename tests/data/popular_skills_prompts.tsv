@@ -4,7 +4,7 @@
 # distractor set, not the artificially narrow 17-skill anthropic library.
 #
 # Run with both roots on SKI_ROOTS (colon-separated):
-#   SKI_ROOTS="/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
+#   SKI_ROOTS="/var/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
 #     PROMPTS=popular_skills_prompts.tsv ./run-anthropic-prompts.sh -g
 #
 # Format: <expected-skill-id>\t<kind>\t<prompt>
@@ -29,6 +29,34 @@ docker-expert	task	harden and optimize the security of my Docker container
 multi-stage-dockerfile	direct	create an optimized multi-stage Dockerfile for my Go service
 swiftui-pro	direct	review my SwiftUI code for modern API best practices
 kubernetes-specialist	direct	write a kubernetes deployment manifest with pod security policies
+
+# --- more positives: indirect/paraphrased phrasings across uncovered skills.
+#     These stress RECALL (the thing a tighter gate must not break), especially
+#     the `task` rows where the prompt never names the skill's tech directly.
+accessibility	task	audit my web page for WCAG color contrast and aria problems
+nextjs-app-router-patterns	direct	structure my Next.js app router with server components and layouts
+e2e-testing-patterns	task	set up end-to-end browser tests with the page object pattern
+fastapi-templates	direct	scaffold a FastAPI service with routers and pydantic models
+github-actions-templates	task	write a CI workflow that builds and tests on every push to GitHub
+golang-code-style	task	review my Go code for idiomatic style and error handling
+pandas-pro	task	speed up this slow pandas groupby over a large dataframe
+rust-async-patterns	task	fix the deadlock in my tokio async futures
+rust-best-practices	task	make this rust code more idiomatic with proper error types
+shopify-storefront-graphql	direct	query products from the Shopify storefront GraphQL API
+svelte-code-writer	direct	build a Svelte component using stores and reactivity
+swift-concurrency-pro	task	convert my swift completion handlers to async await with actors
+tailwind-design-system	task	build a consistent design system of tokens with Tailwind
+docx	task	generate a Word document with a table of contents and headings
+pptx	task	turn this outline into a PowerPoint slide deck
+xlsx	task	build a spreadsheet with formulas and a chart
+pdf	task	extract the tables from this PDF and merge several files into one
+mcp-builder	direct	build an MCP server exposing tools for an external API
+webapp-testing	task	use Playwright to click through my local web app and screenshot it
+algorithmic-art	direct	create generative flow-field art with p5.js
+claude-api	direct	which claude model id and price should I use for tool calling
+slack-gif-creator	direct	make an animated gif of a dancing cat for slack
+internal-comms	task	write an internal status update to leadership about the launch
+skill-creator	direct	create a new agent skill with a good triggering description
 
 # --- confusables (two installed skills legitimately compete) ---------------
 terraform-test	confusable	test my terraform infrastructure code
@@ -66,3 +94,43 @@ python-performance-optimization	borderline	bootstrap a python project with uv an
 (none)	negative	merge two sorted arrays into one sorted array
 (none)	negative	format a date as ISO 8601 in JavaScript
 (none)	negative	explain how a hash map handles collisions
+# low-level systems / C / C++ (no matching skill)
+(none)	negative	fix a dangling pointer crash in my C code
+(none)	negative	implement a custom arena memory allocator in C
+(none)	negative	what does the volatile keyword mean in C++
+(none)	negative	align a struct to a cache line in C
+(none)	negative	fix a deadlock between two pthread mutexes in C
+(none)	negative	read an i2c temperature sensor on a raspberry pi in C
+# JVM / Java / Kotlin (no matching skill)
+(none)	negative	tune the JVM garbage collector for low pause times
+(none)	negative	fix a ConcurrentModificationException while iterating a Java list
+(none)	negative	implement the builder pattern in Java
+(none)	negative	write a coroutine in Kotlin with structured concurrency
+# algorithms / data structures / CS theory (no matching skill)
+(none)	negative	implement Dijkstra's shortest path algorithm
+(none)	negative	rebalance an AVL tree after an insertion
+(none)	negative	compute the edit distance between two strings with dynamic programming
+(none)	negative	build a trie for prefix autocomplete
+(none)	negative	what is the difference between BFS and DFS traversal
+(none)	negative	what is the worst case time complexity of quicksort
+(none)	negative	explain the CAP theorem in distributed systems
+# networking / OS / protocols (no matching skill)
+(none)	negative	explain the TCP three-way handshake
+(none)	negative	why is my UDP datagram getting fragmented
+(none)	negative	explain copy-on-write semantics in fork
+# other languages (no matching skill)
+(none)	negative	write a Haskell function to fold over a list
+(none)	negative	pattern match on a tagged tuple in Elixir
+(none)	negative	write a Lua script to configure my editor
+# math / crypto (no matching skill)
+(none)	negative	compute the eigenvalues of a 3x3 matrix
+(none)	negative	implement RSA key generation from scratch
+(none)	negative	convert an integer to its two's complement binary form
+# shell / git / dev-env tooling (the proper-noun over-inject class)
+(none)	negative	write a bash script to find and delete log files older than a week
+(none)	negative	set up zsh tab completion for my custom command
+(none)	negative	add aliases to my gitconfig
+(none)	negative	rebase my feature branch onto main and squash the commits
+(none)	negative	configure ssh to use a jump host
+# hardware / embedded (a hard "debounce" negative that is NOT the JS one)
+(none)	negative	debounce a physical push button wired to an arduino

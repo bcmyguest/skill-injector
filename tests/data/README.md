@@ -17,12 +17,38 @@ Two uses:
 
 | file | what |
 |---|---|
-| `anthropic_skills_prompts.tsv` | the corpus: `<skill-id>\t<kind>\t<prompt>` |
+| `anthropic_skills_prompts.tsv` | narrow corpus (17-skill anthropic lib): `<skill-id>\t<kind>\t<prompt>` |
+| `popular_skills_prompts.tsv` | realistic corpus for a ~47-skill index (see below) |
 | `run-anthropic-prompts.sh` | scores every prompt via `ski why`, prints accuracy + misses |
 
 `kind` is `direct` (explicit domain words), `task` (indirect/realistic),
-`confusable` (two skills compete), or `negative` (should match nothing,
-`skill-id = (none)`).
+`confusable` (two skills compete), `negative` (should match nothing,
+`skill-id = (none)`), or `borderline` (observe-only; excluded from headline
+metrics).
+
+## Precision corpus + in-process eval (`popular_skills_prompts.tsv`)
+
+The narrow 17-skill anthropic library is *misleading* for over-injection: indirect
+prompts have no good match there, so real matches score like noise. The realistic
+corpus unions those 17 with the 31 highest-installed community skills from
+skills.sh (`/var/tmp/ski-eval/.claude/skills`), giving a ~47-skill index where a
+genuine knee exists between real matches and unrelated programming prompts. It
+carries 43 positives (paraphrased/indirect across the library) and 52 negatives
+(real C/C++/JVM/algorithms/theory/other-language/dev-env prompts that should match
+*nothing*) — so a fired injection on a negative is a true false positive.
+
+`examples/eval.rs` runs the **real two-stage decision** (stage-1 cosine, or the
+cross-encoder when ambiguous) in-process — one model load, not the per-prompt
+subprocess of `run-anthropic-prompts.sh` — and prints a confusion matrix (recall
+on positives, false-positive rate on negatives) plus per-prompt score dumps:
+
+```sh
+SKI_ROOTS="/var/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
+  cargo run --example eval -- tests/data/popular_skills_prompts.tsv -v
+```
+
+Use it to tune the gate (`rerank_min`, `min_similarity`) against a realistic
+distractor set instead of overfitting a scalar to a handful of prompts.
 
 ## Run
 
