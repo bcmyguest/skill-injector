@@ -60,9 +60,23 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in rd.flatten() {
         let p = entry.path();
         if p.is_dir() {
+            // Skip build/VCS dirs, and the test/example/template trees that ship
+            // inside checked-out skill repos: their `SKILL.md` files are fixtures
+            // and placeholders, not installed skills, and indexing them injects
+            // pure noise (e.g. a repo's `tests/fixtures/skills/*` cloned under
+            // `~/.claude/plugins`).
             let skip = matches!(
                 p.file_name().and_then(|s| s.to_str()),
-                Some(".git" | "target" | "node_modules")
+                Some(
+                    ".git"
+                        | "target"
+                        | "node_modules"
+                        | "tests"
+                        | "fixtures"
+                        | "examples"
+                        | "template"
+                        | "templates"
+                )
             );
             if !skip {
                 collect(&p, out);
@@ -79,7 +93,7 @@ pub fn parse_file(path: &Path) -> anyhow::Result<Option<Skill>> {
     let Some((name, description, mut keywords)) = parse_frontmatter(&content) else {
         return Ok(None);
     };
-    if name.is_empty() || description.is_empty() {
+    if name.is_empty() || description.is_empty() || is_placeholder(&description) {
         return Ok(None);
     }
     for tok in tokenize(&name) {
@@ -161,6 +175,16 @@ pub fn parse_frontmatter(content: &str) -> Option<(String, String, Vec<String>)>
     Some((name, description, keywords))
 }
 
+/// Whether a description is the unfilled skeleton from a `template/SKILL.md`
+/// (e.g. "Replace with description of the skill…"). Such files are scaffolding,
+/// not installed skills, so they must never be indexed or injected.
+fn is_placeholder(description: &str) -> bool {
+    description
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("replace with")
+}
+
 fn unquote(s: &str) -> String {
     let s = s.trim();
     let bytes = s.as_bytes();
@@ -207,5 +231,30 @@ mod tests {
     #[test]
     fn rejects_without_frontmatter() {
         assert!(parse_frontmatter("no frontmatter here").is_none());
+    }
+
+    #[test]
+    fn detects_template_placeholder() {
+        assert!(is_placeholder(
+            "Replace with description of the skill and when Claude should use it."
+        ));
+        assert!(is_placeholder("  replace WITH something"));
+        assert!(!is_placeholder("Credit AI assistance in git commits."));
+    }
+
+    #[test]
+    fn parse_file_rejects_placeholder_skill() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("ski-tpl-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        let mut f = fs::File::create(&path).unwrap();
+        write!(
+            f,
+            "---\nname: template-skill\ndescription: Replace with description of the skill.\n---\nbody\n"
+        )
+        .unwrap();
+        assert!(parse_file(&path).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
