@@ -76,9 +76,10 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     }
     let _ = &event.cwd; // project-scoped config/roots arrive in a later milestone.
 
-    let mut cfg = Config::for_host(host);
+    let (mut cfg, file) = Config::load(host);
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
+    file.apply_cosine(&mut cfg); // user pin wins over embedder calibration.
     let idx = load_or_build_index(&cfg, embedder.as_ref(), host)?;
     if idx.skills.is_empty() {
         return Ok(Decision::default());

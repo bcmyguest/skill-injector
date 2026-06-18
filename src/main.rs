@@ -71,14 +71,8 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Index { rebuild, host } => {
-            let host = host.parse::<Host>()?;
-            cmd_index(&Config::for_host(host), host, rebuild)
-        }
-        Cmd::Why { prompt, top, host } => {
-            let host = host.parse::<Host>()?;
-            cmd_why(&Config::for_host(host), &prompt.join(" "), top)
-        }
+        Cmd::Index { rebuild, host } => cmd_index(host.parse::<Host>()?, rebuild),
+        Cmd::Why { prompt, top, host } => cmd_why(host.parse::<Host>()?, &prompt.join(" "), top),
         Cmd::Hook { host } => hook::run(host.parse::<Host>()?),
         Cmd::Observe { host } => observe::run(host.parse::<Host>()?),
         Cmd::SessionStart { host } => session_start::run(host.parse::<Host>()?),
@@ -86,7 +80,8 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_index(cfg: &Config, host: Host, rebuild: bool) -> Result<()> {
+fn cmd_index(host: Host, rebuild: bool) -> Result<()> {
+    let (cfg, _file) = Config::load(host);
     let index_path = paths::index_path(host);
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
@@ -107,8 +102,8 @@ fn cmd_index(cfg: &Config, host: Host, rebuild: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_why(cfg: &Config, prompt: &str, top: usize) -> Result<()> {
-    let mut cfg = cfg.clone();
+fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
+    let (mut cfg, file) = Config::load(host);
     let skills = skill::discover(&cfg.roots)?;
     if skills.is_empty() {
         println!("no skills found in roots: {:?}", cfg.roots);
@@ -116,6 +111,7 @@ fn cmd_why(cfg: &Config, prompt: &str, top: usize) -> Result<()> {
     }
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
+    file.apply_cosine(&mut cfg); // user pin wins over embedder calibration.
     let idx = index::build(&skills, embedder.as_ref(), None)?;
     let query = embedder
         .embed(&[prompt.to_string()], EmbedKind::Query)?

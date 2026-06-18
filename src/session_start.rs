@@ -53,7 +53,7 @@ fn session_start(host: Host) -> anyhow::Result<()> {
 /// Incrementally refresh the persisted index. Best-effort: any failure (no
 /// skills, embedder build, IO) leaves the previous index untouched.
 fn reindex(host: Host) {
-    let cfg = Config::for_host(host);
+    let (cfg, _file) = Config::load(host);
     let Ok(skills) = skill::discover(&cfg.roots) else {
         return;
     };

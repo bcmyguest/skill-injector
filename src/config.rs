@@ -1,8 +1,11 @@
-//! Runtime configuration. Milestone 1 uses defaults only; a config-file loader
-//! (`~/.config/ski/config.toml`) lands with the hook path in milestone 2.
+//! Runtime configuration. Compiled defaults ([`Config::base`]), overlaid by an
+//! optional user file (`~/.config/ski/config.toml`, see [`FileConfig`]) loaded
+//! through [`Config::load`]. The file is the escape hatch: silence a noisy skill
+//! with `deny`, pin `rerank_min`, widen `max_skills`, etc. without a rebuild.
 
 use crate::embed::Embedder;
 use crate::hook::Host;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// How a matched skill is delivered to the model.
@@ -96,6 +99,18 @@ impl Config {
         }
     }
 
+    /// Host-scoped config with the user file ([`FileConfig`]) overlaid, returned
+    /// alongside the parsed file. The file is returned so a caller that calibrates
+    /// can re-assert the cosine pins afterward: [`Config::calibrate_to`] overwrites
+    /// `min_similarity`/`score_margin` from the embedder and would otherwise clobber
+    /// a user-set value. Callers that never calibrate can ignore the [`FileConfig`].
+    pub fn load(host: Host) -> (Self, FileConfig) {
+        let file = FileConfig::load();
+        let mut cfg = Self::for_host(host);
+        file.apply(&mut cfg);
+        (cfg, file)
+    }
+
     /// Every field except `roots`, which [`Config::for_host`] fills per host.
     fn base() -> Self {
         Self {
@@ -136,6 +151,133 @@ impl Default for Config {
     /// here; the hot paths build [`Config::for_host`] from their `--host` flag.
     fn default() -> Self {
         Self::for_host(Host::Claude)
+    }
+}
+
+/// User overrides parsed from `~/.config/ski/config.toml`. Every field is
+/// optional; an absent field — or an absent/malformed file — leaves the compiled
+/// default untouched. Parsing fails open: a malformed file yields an empty
+/// overlay (all defaults) rather than an error, so a bad config can never block
+/// injection. Unknown keys are ignored (a typo drops one field, not the file).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FileConfig {
+    pub model: Option<String>,
+    pub min_similarity: Option<f32>,
+    pub score_margin: Option<f32>,
+    pub max_skills: Option<usize>,
+    pub char_budget: Option<usize>,
+    pub keyword_boost: Option<f32>,
+    pub roots: Option<Vec<PathBuf>>,
+    pub inject_mode: Option<String>,
+    pub directive_strength: Option<String>,
+    pub deny: Option<Vec<String>>,
+    pub force: Option<Vec<String>>,
+    pub recall_floor: Option<f32>,
+    pub high_conf: Option<f32>,
+    pub clear_gap: Option<f32>,
+    pub rerank_top_k: Option<usize>,
+    pub rerank_min: Option<f32>,
+    pub rerank_margin: Option<f32>,
+}
+
+impl FileConfig {
+    /// Parse the user config, or an empty (all-default) overlay when the file is
+    /// missing or unparseable.
+    pub fn load() -> Self {
+        std::fs::read_to_string(crate::paths::config_path())
+            .ok()
+            .and_then(|raw| Self::parse(&raw))
+            .unwrap_or_default()
+    }
+
+    /// Pure TOML parse, shared by [`load`](Self::load) and tests. `None` on
+    /// malformed input.
+    fn parse(raw: &str) -> Option<Self> {
+        toml::from_str(raw).ok()
+    }
+
+    /// Overlay every present field onto `cfg`. `roots` is ignored while the
+    /// `SKI_ROOTS` env override is active (env wins, for evals/tooling). Unknown
+    /// `inject_mode`/`directive_strength` strings are ignored, keeping the default.
+    pub fn apply(&self, cfg: &mut Config) {
+        if let Some(v) = &self.model {
+            cfg.model = v.clone();
+        }
+        self.apply_cosine(cfg);
+        if let Some(v) = self.max_skills {
+            cfg.max_skills = v;
+        }
+        if let Some(v) = self.char_budget {
+            cfg.char_budget = v;
+        }
+        if let Some(v) = self.keyword_boost {
+            cfg.keyword_boost = v;
+        }
+        if let Some(v) = &self.roots {
+            if std::env::var_os("SKI_ROOTS").is_none() {
+                cfg.roots = v.clone();
+            }
+        }
+        if let Some(m) = self.inject_mode.as_deref().and_then(parse_inject_mode) {
+            cfg.inject_mode = m;
+        }
+        if let Some(s) = self.directive_strength.as_deref().and_then(parse_strength) {
+            cfg.directive_strength = s;
+        }
+        if let Some(v) = &self.deny {
+            cfg.deny = v.clone();
+        }
+        if let Some(v) = &self.force {
+            cfg.force = v.clone();
+        }
+        if let Some(v) = self.recall_floor {
+            cfg.recall_floor = v;
+        }
+        if let Some(v) = self.high_conf {
+            cfg.high_conf = v;
+        }
+        if let Some(v) = self.clear_gap {
+            cfg.clear_gap = v;
+        }
+        if let Some(v) = self.rerank_top_k {
+            cfg.rerank_top_k = v;
+        }
+        if let Some(v) = self.rerank_min {
+            cfg.rerank_min = v;
+        }
+        if let Some(v) = self.rerank_margin {
+            cfg.rerank_margin = v;
+        }
+    }
+
+    /// Re-assert just the cosine thresholds. [`Config::calibrate_to`] overwrites
+    /// `min_similarity`/`score_margin` from the embedder, so a user pin must be
+    /// applied *after* calibration to survive.
+    pub fn apply_cosine(&self, cfg: &mut Config) {
+        if let Some(v) = self.min_similarity {
+            cfg.min_similarity = v;
+        }
+        if let Some(v) = self.score_margin {
+            cfg.score_margin = v;
+        }
+    }
+}
+
+fn parse_inject_mode(s: &str) -> Option<InjectMode> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "directive" => Some(InjectMode::Directive),
+        "body" => Some(InjectMode::Body),
+        _ => None,
+    }
+}
+
+fn parse_strength(s: &str) -> Option<Strength> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(Strength::Auto),
+        "soft" => Some(Strength::Soft),
+        "hard" => Some(Strength::Hard),
+        _ => None,
     }
 }
 
@@ -281,6 +423,62 @@ mod tests {
         assert!(parse_opencode_paths("{}", None).is_empty());
         assert!(parse_opencode_paths(r#"{"skills":{}}"#, None).is_empty());
         assert!(parse_opencode_paths("not json", None).is_empty());
+    }
+
+    #[test]
+    fn file_overlay_applies_present_fields_only() {
+        let raw = r#"
+            max_skills = 5
+            rerank_min = -0.5
+            deny = ["noisy-skill"]
+            inject_mode = "body"
+            directive_strength = "hard"
+        "#;
+        let file = FileConfig::parse(raw).unwrap();
+        let mut cfg = Config::default();
+        let (orig_model, orig_budget) = (cfg.model.clone(), cfg.char_budget);
+        file.apply(&mut cfg);
+        assert_eq!(cfg.max_skills, 5);
+        assert_eq!(cfg.rerank_min, -0.5);
+        assert_eq!(cfg.deny, ["noisy-skill"]);
+        assert_eq!(cfg.inject_mode, InjectMode::Body);
+        assert_eq!(cfg.directive_strength, Strength::Hard);
+        // Untouched fields keep their defaults.
+        assert_eq!(cfg.model, orig_model);
+        assert_eq!(cfg.char_budget, orig_budget);
+    }
+
+    #[test]
+    fn cosine_pin_survives_calibration() {
+        // A user pin must win even though calibrate_to runs after the overlay.
+        let file = FileConfig::parse("min_similarity = 0.80").unwrap();
+        let mut cfg = Config::default();
+        file.apply(&mut cfg);
+        cfg.calibrate_to(&StubEmbedder); // would set 0.64
+        file.apply_cosine(&mut cfg); // re-assert the pin
+        assert_eq!(cfg.min_similarity, 0.80);
+        assert_eq!(cfg.score_margin, 0.12); // unpinned -> embedder value
+    }
+
+    #[test]
+    fn malformed_file_is_empty_overlay() {
+        assert!(FileConfig::parse("this is not = = toml").is_none());
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let file = FileConfig::parse("bogus_key = 1\nmax_skills = 3").unwrap();
+        let mut cfg = Config::default();
+        file.apply(&mut cfg);
+        assert_eq!(cfg.max_skills, 3);
+    }
+
+    #[test]
+    fn bad_enum_string_keeps_default() {
+        let file = FileConfig::parse(r#"inject_mode = "nonsense""#).unwrap();
+        let mut cfg = Config::default();
+        file.apply(&mut cfg);
+        assert_eq!(cfg.inject_mode, InjectMode::Directive); // unchanged
     }
 
     #[test]

@@ -49,6 +49,12 @@ pub fn model_cache_dir() -> PathBuf {
     config_dir().join("models")
 }
 
+/// Optional user config (`~/.config/ski/config.toml`). Absent by default; when
+/// present its fields override the compiled defaults (see [`crate::config`]).
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
 /// `~/.claude/settings.json` — Claude Code's user settings. `ski init --host
 /// claude` merges its hooks here, the marketplace-free install path for users
 /// who can't run `/plugin`.

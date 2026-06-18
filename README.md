@@ -152,6 +152,39 @@ Downloaded embedder/reranker models cache once at `$XDG_CONFIG_HOME/ski/models` 
 `~/.config/ski/models`) — never in the working directory.
 `SKI_ROOTS` (colon-separated) overrides the skill-discovery roots for both hosts.
 
+## Configuration
+
+Everything works with no config. An optional `~/.config/ski/config.toml`
+(`$XDG_CONFIG_HOME/ski/config.toml`) overrides the compiled defaults — every key is
+optional, and a missing or malformed file is ignored (fail open, never blocks a prompt).
+The most-reached-for key is `deny`, to silence a skill that keeps surfacing.
+
+```toml
+# Silence / force specific skills (by their `name`):
+deny  = ["example-skill"]   # never auto-injected
+force = []                  # injected whenever a keyword hits, even below threshold
+
+max_skills  = 2             # max skills injected per prompt
+char_budget = 6000          # max total injected characters
+
+# Reranker gate — JINA cross-encoder logits, where ~0 is the relevant/irrelevant
+# boundary. Raise toward 0 to inject less; lower to inject more.
+rerank_min = -2.5
+
+# Stage-1 cosine thresholds. Normally left to per-embedder calibration; pin to override.
+# min_similarity = 0.30
+# score_margin   = 0.15
+
+# model              = "bge-small-en-v1.5"   # or "all-MiniLM-L6-v2-q"
+# inject_mode        = "directive"           # or "body"
+# directive_strength = "auto"                # auto | soft | hard
+# roots              = ["/abs/path/to/skills"]  # discovery roots; not tilde-expanded,
+#                                               # and the SKI_ROOTS env var still wins
+```
+
+Advanced ranking knobs are also accepted: `keyword_boost`, `recall_floor`, `high_conf`,
+`clear_gap`, `rerank_top_k`, `rerank_margin` (see `src/config.rs` for what each gates).
+
 ## How it works
 
 ```
