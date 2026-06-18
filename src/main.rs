@@ -73,11 +73,12 @@ enum Cmd {
         global: bool,
     },
     /// Read the opt-in telemetry log (recommendations vs. actual use). Default is
-    /// the aggregate readout; `--tail N` lists recent calls individually (prompt,
-    /// confidences, used?). Empty unless hooks ran with `SKI_TELEMETRY=1`.
+    /// the aggregate readout; `--tail N` lists recent calls individually —
+    /// recommendations (prompt, per-candidate confidence, used?) and self-loads
+    /// (acted-on-rec vs. recall miss). Empty unless hooks ran with `SKI_TELEMETRY=1`.
     History {
-        /// List the most recent N recommendation events individually instead of
-        /// the aggregate.
+        /// List the most recent N events individually (recommendations and
+        /// self-loads, newest last) instead of the aggregate.
         #[arg(long)]
         tail: Option<usize>,
         /// When listing, only events whose session id contains this substring.
