@@ -15,6 +15,10 @@ pub struct Entry {
     pub description: String,
     pub path: String,
     pub keywords: Vec<String>,
+    /// Trigger phrases for the phrase channel (see [`crate::skill::extract_phrases`]).
+    /// `#[serde(default)]` so indexes written before this field still load.
+    #[serde(default)]
+    pub trigger_phrases: Vec<String>,
     pub hash: String,
     pub embedding: Vec<f32>,
 }
@@ -82,7 +86,15 @@ pub fn build(
             .filter(|e| e.hash == s.hash)
             .cloned();
         match reuse {
-            Some(e) => entries[i] = Some(e),
+            // Reuse the cached embedding, but refresh the cheap content-derived
+            // metadata (keywords, trigger phrases): an index written before these
+            // were extracted has a matching hash, so without this the phrase
+            // channel would stay dark until each skill's content next changed.
+            Some(mut e) => {
+                e.keywords = s.keywords.clone();
+                e.trigger_phrases = s.trigger_phrases.clone();
+                entries[i] = Some(e);
+            }
             None => to_embed.push(i),
         }
     }
@@ -101,6 +113,7 @@ pub fn build(
                 description: s.description.clone(),
                 path: s.path.display().to_string(),
                 keywords: s.keywords.clone(),
+                trigger_phrases: s.trigger_phrases.clone(),
                 hash: s.hash.clone(),
                 embedding: embs[k].clone(),
             });
@@ -123,6 +136,7 @@ mod tests {
             description: String::new(),
             path: path.to_string(),
             keywords: Vec::new(),
+            trigger_phrases: Vec::new(),
             hash: String::new(),
             embedding: Vec::new(),
         }

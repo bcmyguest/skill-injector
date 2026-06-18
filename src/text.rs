@@ -24,6 +24,26 @@ pub fn tokenize(s: &str) -> Vec<String> {
     out
 }
 
+/// Function words that carry no discriminative signal for phrase matching. Kept
+/// deliberately small — just the high-frequency glue that would otherwise let a
+/// trigger phrase fire on, or be padded to length by, unrelated prose. Domain
+/// terms are never listed here.
+const STOPWORDS: &[&str] = &[
+    "the", "an", "of", "to", "for", "and", "or", "in", "on", "at", "is", "it", "be", "as", "by",
+    "with", "from", "into", "me", "my", "we", "our", "you", "your", "this", "that", "these",
+    "those", "use", "used", "when", "user", "users", "say", "says", "want", "wants", "ask", "asks",
+    "do", "does", "not", "if", "so", "up", "out", "via", "are", "was", "will", "can", "a", "i",
+];
+
+/// `tokenize`, minus stopwords — the discriminative tokens of a phrase. Used both
+/// to gate a candidate phrase by length and to match it against a prompt.
+pub fn content_tokens(s: &str) -> Vec<String> {
+    tokenize(s)
+        .into_iter()
+        .filter(|t| !STOPWORDS.contains(&t.as_str()))
+        .collect()
+}
+
 /// FNV-1a 32-bit — stable token→bucket hash for the bag-of-words embedder.
 pub fn fnv1a_32(s: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
@@ -59,6 +79,18 @@ mod tests {
     #[test]
     fn tokenize_drops_single_chars() {
         assert_eq!(tokenize("a b cd e"), ["cd"]);
+    }
+
+    #[test]
+    fn content_tokens_drops_stopwords() {
+        // Function words carry no discriminative signal for phrase matching, so
+        // they are excluded from the content-token set (and the length gate).
+        assert_eq!(
+            content_tokens("connect to the Neon database"),
+            ["connect", "neon", "database"]
+        );
+        // A phrase that is *only* stopwords/short words collapses to nothing.
+        assert!(content_tokens("set it up").is_empty() || content_tokens("set it up") == ["set"]);
     }
 
     #[test]

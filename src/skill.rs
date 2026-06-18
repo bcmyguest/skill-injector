@@ -17,6 +17,11 @@ pub struct Skill {
     /// Keywords for the hybrid keyword boost: explicit `keywords`/`aliases`
     /// frontmatter, plus tokens derived from the name.
     pub keywords: Vec<String>,
+    /// Multi-word trigger phrases mined from the description's quoted spans (the
+    /// literal wording a skill says to invoke it on, e.g. `"find that online"`).
+    /// Each is normalized to its content tokens; the ranker boosts a skill when a
+    /// prompt contains all of a phrase's tokens. See [`extract_phrases`].
+    pub trigger_phrases: Vec<String>,
     pub path: PathBuf,
     /// Content hash for index cache invalidation.
     pub hash: String,
@@ -102,15 +107,95 @@ pub fn parse_file(path: &Path) -> anyhow::Result<Option<Skill>> {
         }
     }
     let hash = format!("{:016x}", fnv1a_64(content.as_bytes()));
+    let trigger_phrases = extract_phrases(&description);
     Ok(Some(Skill {
         id: name.clone(),
         name,
         description,
         body_head: body_head(&content, 8, 600),
         keywords,
+        trigger_phrases,
         path: path.to_path_buf(),
         hash,
     }))
+}
+
+/// Minimum content tokens (stopwords excluded) for a quoted span to qualify as a
+/// trigger phrase. Two is the floor: a full two-token match (e.g. `connect mysql`,
+/// `screen reader support`) requires *both* discriminative tokens present, which
+/// stays high-precision on realistic prompts while covering the many two-word
+/// triggers skills actually ship. Single-token spans ("set up" → `set`, "report",
+/// "the file") collapse below this and are dropped — they are common-word noise
+/// that belongs to the dense/keyword channels, not here.
+const MIN_PHRASE_TOKENS: usize = 2;
+
+/// Upper bound on content tokens. A quoted span longer than this is a sentence or
+/// a wholly-quoted description, not a trigger phrase — reject it so the channel
+/// stays a *phrase* matcher and never demands a paragraph-length token overlap.
+const MAX_PHRASE_TOKENS: usize = 10;
+
+/// Mine multi-word trigger phrases from a skill description. Scans the *already
+/// unquoted* description for inner quoted spans (single or double quotes, ASCII or
+/// curly), keeps those with [`MIN_PHRASE_TOKENS`]..=[`MAX_PHRASE_TOKENS`] content
+/// tokens, and returns each normalized to a space-joined string of its content
+/// tokens (the form the ranker matches against a prompt). De-duplicated,
+/// order-preserving.
+///
+/// Runs on the parsed description, never the raw YAML line, so a wholly
+/// double-quoted `description:` value does not surface its entire text as one
+/// phrase — only the genuinely inner quotes remain.
+///
+/// A straight `'` only opens/closes a span at a word boundary (preceded/followed
+/// by a non-alphanumeric or the string edge), so apostrophes in contractions and
+/// possessives — `don't`, `user's` — are not mistaken for quotes.
+pub fn extract_phrases(description: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let chars: Vec<char> = description.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(close) = opens_quote(&chars, i) {
+            // Find the matching close at a word boundary.
+            if let Some(end) = find_close(&chars, i + 1, close) {
+                let span: String = chars[i + 1..end].iter().collect();
+                let toks = crate::text::content_tokens(&span);
+                if (MIN_PHRASE_TOKENS..=MAX_PHRASE_TOKENS).contains(&toks.len()) {
+                    let phrase = toks.join(" ");
+                    if !out.contains(&phrase) {
+                        out.push(phrase);
+                    }
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        let _ = c;
+        i += 1;
+    }
+    out
+}
+
+/// If position `i` is an opening quote, return the char that closes it. A straight
+/// quote must sit at a left word boundary to count (else it is an apostrophe).
+fn opens_quote(chars: &[char], i: usize) -> Option<char> {
+    let c = chars[i];
+    let close = match c {
+        '\u{201c}' => '\u{201d}', // “ ”
+        '\u{2018}' => '\u{2019}', // ‘ ’
+        '"' | '\'' => c,          // straight quotes close themselves
+        _ => return None,
+    };
+    let boundary = i == 0 || !chars[i - 1].is_alphanumeric();
+    boundary.then_some(close)
+}
+
+/// Index of the closing quote `close` at or after `from`, requiring a right word
+/// boundary for straight quotes so contraction apostrophes do not close early.
+fn find_close(chars: &[char], from: usize, close: char) -> Option<usize> {
+    let straight = close == '"' || close == '\'';
+    (from..chars.len()).find(|&j| {
+        chars[j] == close && (!straight || chars.get(j + 1).is_none_or(|n| !n.is_alphanumeric()))
+    })
 }
 
 /// Pull the first `max_lines` non-blank body lines (after the frontmatter),
@@ -240,6 +325,68 @@ mod tests {
         ));
         assert!(is_placeholder("  replace WITH something"));
         assert!(!is_placeholder("Credit AI assistance in git commits."));
+    }
+
+    #[test]
+    fn extracts_multiword_trigger_phrases() {
+        // Inner-quoted spans in the (already unquoted) description that carry >=3
+        // content tokens become trigger phrases, normalized to their content tokens.
+        let desc = "Use when the user says \"find that page online\" or asks to \"search the public web archive\".";
+        let ph = extract_phrases(desc);
+        assert!(ph.contains(&"find page online".to_string()), "got {ph:?}");
+        // "the" is a stopword and dropped; the rest survive as content tokens.
+        assert!(
+            ph.contains(&"search public web archive".to_string()),
+            "got {ph:?}"
+        );
+    }
+
+    #[test]
+    fn ignores_short_and_common_quoted_spans() {
+        // Single-word or all-stopword quotes are noise, not triggers, and must not
+        // become phrases (they would over-fire the lexical channel).
+        let desc = "Triggers include 'report', 'memo', 'set up', and \"the file\".";
+        assert!(
+            extract_phrases(desc).is_empty(),
+            "short/common quotes leaked: {:?}",
+            extract_phrases(desc)
+        );
+    }
+
+    #[test]
+    fn extraction_ignores_yaml_outer_quoting() {
+        // A description whose YAML value is wholly double-quoted must not yield the
+        // entire description as one giant "phrase": extraction runs on the parsed,
+        // unquoted value, and the only real triggers are the inner single quotes.
+        let md = "---\nname: docx\ndescription: \"Edit Word docs. Triggers include any mention of 'word document export'.\"\n---\nbody\n";
+        let s = parse_file_from_str(md);
+        assert!(
+            s.trigger_phrases
+                .iter()
+                .all(|p| p.split_whitespace().count() <= 4),
+            "outer YAML quote captured as phrase: {:?}",
+            s.trigger_phrases
+        );
+        assert!(s
+            .trigger_phrases
+            .contains(&"word document export".to_string()));
+    }
+
+    /// Test helper: parse a SKILL.md from a string via a temp file.
+    fn parse_file_from_str(md: &str) -> Skill {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "ski-phrase-{}-{}",
+            std::process::id(),
+            fnv1a_64(md.as_bytes())
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        let mut f = fs::File::create(&path).unwrap();
+        write!(f, "{md}").unwrap();
+        let s = parse_file(&path).unwrap().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        s
     }
 
     #[test]

@@ -48,6 +48,11 @@ pub struct Config {
     pub char_budget: usize,
     /// Added to a skill's score per matching keyword.
     pub keyword_boost: f32,
+    /// Added to a skill's score per matched trigger phrase (see
+    /// [`crate::rank::phrase_score`]). Higher than `keyword_boost`: a full
+    /// multi-token phrase match is stronger, higher-precision evidence than a
+    /// single keyword token.
+    pub phrase_boost: f32,
     /// Filesystem roots scanned for `SKILL.md` files.
     pub roots: Vec<PathBuf>,
     /// How matched skills are injected.
@@ -125,6 +130,7 @@ impl Config {
             max_skills: 2,
             char_budget: 6000,
             keyword_boost: 0.15,
+            phrase_boost: 0.20,
             roots: Vec::new(), // overwritten by `for_host`.
             inject_mode: InjectMode::Directive,
             directive_strength: Strength::Auto,
@@ -194,6 +200,7 @@ pub struct FileConfig {
     pub max_skills: Option<usize>,
     pub char_budget: Option<usize>,
     pub keyword_boost: Option<f32>,
+    pub phrase_boost: Option<f32>,
     pub roots: Option<Vec<PathBuf>>,
     pub inject_mode: Option<String>,
     pub directive_strength: Option<String>,
@@ -240,6 +247,9 @@ impl FileConfig {
         }
         if let Some(v) = self.keyword_boost {
             cfg.keyword_boost = v;
+        }
+        if let Some(v) = self.phrase_boost {
+            cfg.phrase_boost = v;
         }
         if let Some(v) = &self.roots {
             if std::env::var_os("SKI_ROOTS").is_none() {

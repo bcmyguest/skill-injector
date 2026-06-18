@@ -19,6 +19,7 @@ Two uses:
 |---|---|
 | `anthropic_skills_prompts.tsv` | narrow corpus (17-skill anthropic lib): `<skill-id>\t<kind>\t<prompt>` |
 | `popular_skills_prompts.tsv` | realistic corpus for a ~47-skill index (see below) |
+| `phrase_trigger_prompts.tsv` | exact-trigger corpus for the phrase channel: positives that type a skill's literal quoted trigger, plus negatives sharing single phrase tokens (precision stress) |
 | `run-anthropic-prompts.sh` | scores every prompt via `ski why`, prints accuracy + misses |
 
 `kind` is `direct` (explicit domain words), `task` (indirect/realistic),
@@ -49,6 +50,15 @@ SKI_ROOTS="/var/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/a
 
 Use it to tune the gate (`rerank_min`, `min_similarity`) against a realistic
 distractor set instead of overfitting a scalar to a handful of prompts.
+
+`SKI_PHRASE_BOOST=<f>` overrides the phrase-channel boost for one run (`0.0`
+disables the channel), so the same corpus can be scored with and without it to
+isolate the phrase channel's effect — e.g. on `phrase_trigger_prompts.tsv`:
+
+```sh
+SKI_PHRASE_BOOST=0.0  cargo run --example eval -- tests/data/phrase_trigger_prompts.tsv
+SKI_PHRASE_BOOST=0.20 cargo run --example eval -- tests/data/phrase_trigger_prompts.tsv
+```
 
 ## Run
 
