@@ -19,6 +19,16 @@ use crate::config::Config;
 use crate::index::Index;
 use crate::rank::Hit;
 
+/// How far below stage-1's solo-injection floor (`min_similarity`) a reranked
+/// candidate may sit and still inject — the cosine "credit" the cross-encoder's
+/// confirmation is worth. Tuned on the realistic corpus *and* a live 56-skill
+/// library: a borderline real match the bi-encoder ranks at ~0.63 ("clean up this
+/// messy CSV" -> xlsx, cosine 0.634) injects, while the false-inject skills cluster
+/// lower (~0.57-0.59) and stay out. Sweep: at this slack recall holds 95% / false
+/// injects 2%; a smaller slack (floor 0.64) drops a positive, a larger one (0.58)
+/// readmits an FP. See `examples/eval`.
+const AGREEMENT_SLACK: f32 = 0.03;
+
 /// Whether stage-1 results warrant the cross-encoder. Skip (return `false`) when:
 /// - nothing clears the recall floor (the prompt has no relevant skill), or
 /// - the top match is a confident lone winner: high absolute score *and* a clear
@@ -75,21 +85,25 @@ pub fn rerank(hits: &[Hit], idx: &Index, prompt: &str, cfg: &Config) -> Option<V
 /// Returns hits sorted by descending reranked score (input order is preserved as
 /// it already is). The caller still applies deny/session/cap.
 ///
-/// **Stage-1 agreement.** Before the reranker thresholds, a candidate must also
-/// have cleared the bi-encoder's own injection floor (`min_similarity`, on the
-/// preserved stage-1 `cosine + keyword`; [`rerank`] only overwrites `score` with
-/// the logit). The cross-encoder's job is to reorder and confirm the *retrieved*
-/// relevant set, not to resurrect a skill stage-1 judged irrelevant. Without this
-/// gate a prompt with no real match — "implement the builder pattern in Java",
-/// "RSA key generation from scratch" — lets the reranker pull a sub-floor skill to
-/// the top and inject noise; the logits there interleave with genuine weak matches
-/// (so no `rerank_min` value separates them), but their stage-1 scores do not.
+/// **Stage-1 agreement.** Before the reranker thresholds, a candidate must have a
+/// bi-encoder score (the preserved stage-1 `cosine + keyword + phrase`; [`rerank`]
+/// only overwrites `score` with the logit) within [`AGREEMENT_SLACK`] of stage-1's
+/// own injection floor (`min_similarity`). The phrase term is included on purpose:
+/// a confident multi-token trigger match is exactly the "stage-1 judged relevant"
+/// signal this gate looks for, so it may carry an otherwise sub-floor cosine through. The cross-encoder's job is to reorder and
+/// confirm the *retrieved* relevant set, not to resurrect a skill stage-1 judged
+/// irrelevant. Without this gate a prompt with no real match — "implement the
+/// builder pattern in Java", "RSA key generation from scratch" — lets the reranker
+/// pull a sub-floor skill to the top and inject noise; the logits there interleave
+/// with genuine weak matches (so no `rerank_min` value separates them), but their
+/// stage-1 scores sit lower (~0.57-0.59 vs ~0.63 for borderline real matches).
 pub fn passes(reranked: &[Hit], cfg: &Config) -> Vec<Hit> {
+    let floor = cfg.min_similarity - AGREEMENT_SLACK;
     // Keep only candidates stage-1 also rated relevant; the best *eligible* logit
     // then anchors the relative margin (a sub-floor leader can't drag peers in).
     let eligible: Vec<&Hit> = reranked
         .iter()
-        .filter(|h| h.cosine + h.keyword >= cfg.min_similarity)
+        .filter(|h| h.cosine + h.keyword + h.phrase >= floor)
         .collect();
     let best = eligible
         .first()
@@ -194,6 +208,7 @@ mod tests {
             name: id.to_string(),
             cosine: score,
             keyword: 0.0,
+            phrase: 0.0,
             score,
         }
     }
@@ -206,6 +221,7 @@ mod tests {
             name: id.to_string(),
             cosine,
             keyword: 0.0,
+            phrase: 0.0,
             score: logit,
         }
     }
@@ -264,10 +280,11 @@ mod tests {
 
     #[test]
     fn passes_rejects_subfloor_stage1_resurrection() {
-        // The reranker pulled a skill to the top (high logit) that stage-1 scored
-        // below its injection floor (cosine 0.20 < 0.30): it must not be injected,
-        // even though its logit clears `rerank_min`. This is the over-injection the
-        // builder-pattern / RSA negatives produced.
+        // The reranker pulled a skill to the top (high logit) whose stage-1 score
+        // (cosine 0.20) sits well below the agreement floor (min_similarity 0.30
+        // minus the slack): it must not be injected, even though its logit clears
+        // `rerank_min`. This is the over-injection the builder-pattern / RSA
+        // negatives produced.
         let reranked = vec![rhit("ghost", 1.50, 0.20), rhit("real", 0.40, 0.72)];
         let got: Vec<String> = passes(&reranked, &cfg())
             .into_iter()

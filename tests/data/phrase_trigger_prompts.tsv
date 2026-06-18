@@ -1,0 +1,32 @@
+# Exact-trigger corpus for the phrase channel.
+#
+# Positives: a user types (close to) a skill's literal quoted trigger phrase —
+# the wording the bi-encoder dilutes inside a long description. Every expected
+# skill is present in the realistic eval index and exposes the matched phrase via
+# `skill::extract_phrases` (see `cargo run --example dump_phrases`).
+#
+# Negatives: prompts that share INDIVIDUAL phrase tokens but are unrelated. They
+# must NOT fire — they stress the all-tokens-present precision rule, especially
+# for two-token phrases.
+#
+# A/B the channel on this file:
+#   SKI_PHRASE_BOOST=0.0  cargo run --example eval -- tests/data/phrase_trigger_prompts.tsv
+#   SKI_PHRASE_BOOST=0.20 cargo run --example eval -- tests/data/phrase_trigger_prompts.tsv
+#
+# Format: <expected-skill-id>\t<kind>\t<prompt>
+
+accessibility	direct	audit my site for wcag compliance
+accessibility	direct	add keyboard navigation to this dropdown widget
+accessibility	task	does this checkout flow need screen reader support
+docx	direct	save these meeting notes as a word document
+prisma-database-setup	direct	help me connect mysql with prisma
+prisma-database-setup	task	configure postgres for my prisma schema
+slack-gif-creator	direct	make a gif doing a happy dance for slack
+xlsx	task	clean up the xlsx in my downloads folder
+
+(none)	negative	how should I word this commit message
+(none)	negative	the navigation bar keeps flickering in my game loop
+(none)	negative	connect to the office wifi from my mysql workbench
+(none)	negative	i need to document the public api in markdown
+(none)	negative	annual compliance training is due next week
+(none)	negative	make the spinner gif loop forever on the landing page

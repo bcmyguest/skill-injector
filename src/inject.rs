@@ -126,6 +126,7 @@ mod tests {
             description: "does a thing".to_string(),
             path: path.to_string(),
             keywords: vec![],
+            trigger_phrases: vec![],
             hash: "0".to_string(),
             embedding: vec![],
         }

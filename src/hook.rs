@@ -263,6 +263,7 @@ mod tests {
             name: id.to_string(),
             cosine: score - keyword,
             keyword,
+            phrase: 0.0,
             score,
         }
     }

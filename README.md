@@ -27,8 +27,8 @@ Skills the model loads on its own are tracked and never re-injected.
 ### See it decide
 
 `ski` scores every installed skill against your prompt and injects **only** the ones
-above a fixed cutoff (`-2.50` below); a higher score is a stronger match. Real `ski why`
-output against a live library of 57 skills (reproduce with `ski index` then
+above a fixed cutoff (`-1.50` below); a higher score is a stronger match. Real `ski why`
+output against a live library of 56 skills (reproduce with `ski index` then
 `ski why "<prompt>"`):
 
 ```text
@@ -39,7 +39,7 @@ $ ski why "clean up this messy CSV"
 
 `clean up this messy CSV` never says *spreadsheet* or *xlsx* — the match is on *meaning*,
 not vocabulary, and it lands far ahead of every other skill. Keyword or description
-matching can't bridge that gap, and a model scanning 57 descriptions can easily miss it.
+matching can't bridge that gap, and a model scanning 56 descriptions can easily miss it.
 
 ```text
 $ ski why "what time is the meeting tomorrow"
@@ -57,7 +57,7 @@ for the dev workflow.
 
 **100% local** — no API call, no token cost, nothing leaves your machine. The whole
 pipeline (embed → retrieve → rerank) runs on CPU — around **half a second per prompt** on
-the machine benchmarked below. Real samples, ranked against a live library of 57 skills:
+the machine benchmarked below. Real samples, ranked against a live library of 56 skills:
 
 | your prompt | skill `ski` injects | match score |
 |---|---|---|
@@ -69,12 +69,12 @@ the machine benchmarked below. Real samples, ranked against a live library of 57
 | `extract tables from a pdf` | `pdf` | 0.67 |
 
 Every row is a real `ski why` result. A higher **match score** means a stronger match;
-anything below `-2.50` is left out entirely (as in the off-topic example above).
+anything below `-1.50` is left out entirely (as in the off-topic example above).
 
 | operation (cold — every hook is a fresh process) | time |
 |---|---|
-| rank + inject one prompt (`ski hook`) | **~0.54 s** median |
-| full index rebuild (57 skills) | ~0.78 s |
+| rank + inject one prompt (`ski hook`) | **~0.57 s** median |
+| full index rebuild (56 skills) | ~0.73 s |
 | incremental reindex, no change | ~0.19 s |
 
 `bge-small-en-v1.5` (384-dim) retrieval + `jina-reranker-v1-turbo-en` rerank, ~270 MB RAM.

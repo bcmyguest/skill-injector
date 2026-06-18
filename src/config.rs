@@ -48,6 +48,11 @@ pub struct Config {
     pub char_budget: usize,
     /// Added to a skill's score per matching keyword.
     pub keyword_boost: f32,
+    /// Added to a skill's score per matched trigger phrase (see
+    /// [`crate::rank::phrase_score`]). Higher than `keyword_boost`: a full
+    /// multi-token phrase match is stronger, higher-precision evidence than a
+    /// single keyword token.
+    pub phrase_boost: f32,
     /// Filesystem roots scanned for `SKILL.md` files.
     pub roots: Vec<PathBuf>,
     /// How matched skills are injected.
@@ -125,6 +130,7 @@ impl Config {
             max_skills: 2,
             char_budget: 6000,
             keyword_boost: 0.15,
+            phrase_boost: 0.20,
             roots: Vec::new(), // overwritten by `for_host`.
             inject_mode: InjectMode::Directive,
             directive_strength: Strength::Auto,
@@ -155,11 +161,12 @@ impl Config {
             // `rerank_min` alone can't catch every false inject: on a richer corpus
             // a no-match prompt's reranked logit interleaves with genuine weak
             // matches, so no scalar separates them. The complementary lever is the
-            // stage-1 *agreement* gate in `rerank::passes` — a reranked skill must
-            // also clear `min_similarity` on its bi-encoder score, i.e. the reranker
-            // may reorder the retrieved-relevant set but not resurrect a skill stage-1
-            // judged irrelevant. That cut false injects a further ~67% (3 -> 1 on the
-            // 52-negative realistic corpus) at no extra compute. See `examples/eval`.
+            // stage-1 *agreement* gate in `rerank::passes` — a reranked skill's
+            // bi-encoder score must sit within a small slack of `min_similarity`,
+            // i.e. the reranker may reorder the retrieved-relevant set but not
+            // resurrect a skill stage-1 judged irrelevant. That cut false injects a
+            // further ~67% (3 -> 1 on the 52-negative realistic corpus) at no extra
+            // compute, holding recall at 95%. See `rerank::AGREEMENT_SLACK`, `examples/eval`.
             recall_floor: 0.50,
             high_conf: 2.0,
             clear_gap: 0.12,
@@ -193,6 +200,7 @@ pub struct FileConfig {
     pub max_skills: Option<usize>,
     pub char_budget: Option<usize>,
     pub keyword_boost: Option<f32>,
+    pub phrase_boost: Option<f32>,
     pub roots: Option<Vec<PathBuf>>,
     pub inject_mode: Option<String>,
     pub directive_strength: Option<String>,
@@ -239,6 +247,9 @@ impl FileConfig {
         }
         if let Some(v) = self.keyword_boost {
             cfg.keyword_boost = v;
+        }
+        if let Some(v) = self.phrase_boost {
+            cfg.phrase_boost = v;
         }
         if let Some(v) = &self.roots {
             if std::env::var_os("SKI_ROOTS").is_none() {

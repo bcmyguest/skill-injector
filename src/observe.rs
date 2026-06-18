@@ -123,6 +123,7 @@ mod tests {
                 description: String::new(),
                 path: path.to_string(),
                 keywords: Vec::new(),
+                trigger_phrases: Vec::new(),
                 hash: String::new(),
                 embedding: Vec::new(),
             }],

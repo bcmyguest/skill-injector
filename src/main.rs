@@ -182,8 +182,8 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
         };
         let mark = if starred { "*" } else { " " };
         println!(
-            "{mark} {:<26} score {:.3}  (cos {:.3} + kw {:.3})",
-            h.name, h.score, h.cosine, h.keyword
+            "{mark} {:<26} score {:.3}  (cos {:.3} + kw {:.3} + ph {:.3})",
+            h.name, h.score, h.cosine, h.keyword, h.phrase
         );
     }
     Ok(())

@@ -90,6 +90,11 @@ fn main() -> anyhow::Result<()> {
     let cases = parse_cases(&raw);
 
     let (mut cfg, file) = Config::load(Host::Claude);
+    // A/B affordance: override the phrase-channel boost (0.0 disables it) so the
+    // same corpus can be scored with and without the channel in one rebuild.
+    if let Ok(v) = std::env::var("SKI_PHRASE_BOOST") {
+        cfg.phrase_boost = v.parse().expect("SKI_PHRASE_BOOST must be a float");
+    }
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
@@ -130,8 +135,8 @@ fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|h| {
                     format!(
-                        "{}=L{:.2}/cos{:.3}+kw{:.2}",
-                        h.id, h.score, h.cosine, h.keyword
+                        "{}=L{:.2}/cos{:.3}+kw{:.2}+ph{:.2}",
+                        h.id, h.score, h.cosine, h.keyword, h.phrase
                     )
                 })
                 .collect();
