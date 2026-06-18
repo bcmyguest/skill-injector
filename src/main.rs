@@ -43,17 +43,22 @@ enum Cmd {
         host: String,
     },
     /// UserPromptSubmit hot-path: decide which skills to inject + emit the
-    /// host's injection contract.
+    /// host's injection contract. Driven by the hooks, not run by hand.
+    #[command(hide = true)]
     Hook {
         #[arg(long)]
         host: String,
     },
-    /// PostToolUse: record skills the model loaded itself.
+    /// PostToolUse: record skills the model loaded itself. Driven by the hooks,
+    /// not run by hand.
+    #[command(hide = true)]
     Observe {
         #[arg(long)]
         host: String,
     },
     /// SessionStart: incremental reindex + re-arm session state on compaction.
+    /// Driven by the hooks, not run by hand.
+    #[command(hide = true)]
     SessionStart {
         #[arg(long)]
         host: String,
