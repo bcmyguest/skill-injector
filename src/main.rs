@@ -42,7 +42,8 @@ enum Cmd {
         #[arg(long, default_value = "claude")]
         host: String,
     },
-    /// [stub, milestone 2] hook hot-path: decide + emit injection.
+    /// UserPromptSubmit hot-path: decide which skills to inject + emit the
+    /// host's injection contract.
     Hook {
         #[arg(long)]
         host: String,
