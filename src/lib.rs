@@ -5,8 +5,10 @@
 //! model-load observation (`ski observe`), session lifecycle
 //! (`ski session-start`), and host setup (`ski init`).
 
+pub mod confidence;
 pub mod config;
 pub mod embed;
+pub mod history;
 pub mod hook;
 pub mod index;
 pub mod init;
@@ -18,4 +20,5 @@ pub mod rerank;
 pub mod session;
 pub mod session_start;
 pub mod skill;
+pub mod telemetry;
 pub mod text;

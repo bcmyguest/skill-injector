@@ -9,12 +9,14 @@
 //!   additionalContext}}`, or nothing when there's no injection.
 //! - opencode: `{skills:[...], inject:"..."}` always (the TS adapter parses it).
 
+use crate::confidence::{self, Stage};
 use crate::config::{Config, Strength};
 use crate::embed::{self, EmbedKind};
 use crate::index::{self, Index};
+use crate::inject::Rec;
 use crate::rank::Hit;
-use crate::session::{Session, Source};
-use crate::{inject, paths, rank, rerank, skill};
+use crate::session::Session;
+use crate::{inject, paths, rank, rerank, skill, telemetry};
 use serde::Deserialize;
 use std::io::Read;
 use std::str::FromStr;
@@ -93,13 +95,14 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     let session_path = paths::session_path(&event.session_id);
     let mut session = Session::load(&session_path);
     // Stage 2: when stage-1 is ambiguous, let the cross-encoder decide; otherwise
-    // (confident winner or nothing relevant) keep the cheap stage-1 result.
-    let selected = match rerank::is_ambiguous(&hits, &cfg)
+    // (confident winner or nothing relevant) keep the cheap stage-1 result. The
+    // stage that wins also sets which confidence mapping the recs carry.
+    let (selected, stage) = match rerank::is_ambiguous(&hits, &cfg)
         .then(|| rerank::rerank(&hits, &idx, &event.prompt, &cfg))
         .flatten()
     {
-        Some(reranked) => select_reranked(reranked, &cfg, &session),
-        None => select(hits, &cfg, &session),
+        Some(reranked) => (select_reranked(reranked, &cfg, &session), Stage::Rerank),
+        None => (select(hits, &cfg, &session), Stage::Cosine),
     };
     if selected.is_empty() {
         return Ok(Decision::default());
@@ -111,15 +114,37 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         return Ok(Decision::default());
     }
 
-    for id in &ids {
-        session.mark(id, Source::Ski);
+    // Record each injected id at the confidence we displayed, so next turn's
+    // score-aware dedup is accurate.
+    let injected: Vec<(String, f32)> = ids
+        .iter()
+        .map(|id| (id.clone(), confidence_of(&selected, id)))
+        .collect();
+    for (id, conf) in &injected {
+        session.mark_recommended(id, *conf);
     }
     let _ = session.save(&session_path); // best-effort: state IO never blocks.
+
+    telemetry::record_recommend(
+        &event.session_id,
+        &event.prompt,
+        stage,
+        &selected,
+        &injected,
+    );
 
     Ok(Decision {
         inject: text,
         skills: ids,
     })
+}
+
+/// The confidence of `id` within `recs` (the value we displayed for it).
+fn confidence_of(recs: &[Rec], id: &str) -> f32 {
+    recs.iter()
+        .find(|r| r.id == id)
+        .map(|r| r.confidence)
+        .unwrap_or(0.0)
 }
 
 /// Load the persisted index; build it on first run so the hook works before an
@@ -147,13 +172,14 @@ fn load_or_build_index(
 
 /// Apply the guardrails: drop denied skills, keep those that clear both the
 /// absolute floor (`min_similarity`) and the relative gate (within `score_margin`
-/// of the best-scoring skill) — or are forced on a keyword hit — then drop any
-/// already in context this session and cap at `max_skills`.
+/// of the best-scoring skill) — or are forced on a keyword hit — attach a
+/// stage-1 confidence, drop any the session's score-aware dedup rejects, and cap
+/// at `max_skills`.
 ///
 /// The relative gate is measured against the global best **before** session
 /// dedup, so re-injecting a prompt whose strong matches are already loaded falls
 /// silent instead of scraping the weak tail.
-fn select(hits: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Hit> {
+fn select(hits: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Rec> {
     let top = hits.first().map(|h| h.score).unwrap_or(0.0);
     hits.into_iter()
         .filter(|h| !cfg.deny.contains(&h.id))
@@ -161,20 +187,28 @@ fn select(hits: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Hit> {
             let forced = cfg.force.contains(&h.id) && h.keyword > 0.0;
             forced || (h.score >= cfg.min_similarity && h.score >= top - cfg.score_margin)
         })
-        .filter(|h| !session.is_loaded(&h.id))
+        .map(|h| Rec {
+            confidence: confidence::of(h.score, Stage::Cosine, cfg),
+            id: h.id,
+        })
+        .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
         .take(cfg.max_skills)
         .collect()
 }
 
 /// Guardrails for the reranked path. The reranker scores already passed their own
-/// floor/margin in [`rerank::passes`], so this only drops denied and
-/// already-loaded skills and caps the count — the reranker-scale equivalent of the
-/// tail of [`select`].
-fn select_reranked(reranked: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Hit> {
+/// floor/margin in [`rerank::passes`], so this attaches a reranker-scale
+/// confidence, drops denied and dedup-rejected skills, and caps the count — the
+/// reranker-scale equivalent of the tail of [`select`].
+fn select_reranked(reranked: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Rec> {
     rerank::passes(&reranked, cfg)
         .into_iter()
         .filter(|h| !cfg.deny.contains(&h.id))
-        .filter(|h| !session.is_loaded(&h.id))
+        .map(|h| Rec {
+            confidence: confidence::of(h.score, Stage::Rerank, cfg),
+            id: h.id,
+        })
+        .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
         .take(cfg.max_skills)
         .collect()
 }
@@ -212,6 +246,7 @@ fn render_opencode(d: &Decision) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::session::Source;
 
     fn hit(id: &str, score: f32, keyword: f32) -> Hit {
         Hit {
@@ -312,13 +347,29 @@ mod tests {
 
     #[test]
     fn select_repeat_falls_silent() {
-        // The strong match is already loaded; the rest are a weak tail measured
-        // against the (still-global) leader, so nothing rides along.
+        // The strong match was already recommended at high confidence, so its
+        // repeat is suppressed; the rest are a weak tail measured against the
+        // (still-global) leader, so nothing rides along either.
         let cfg = Config::default();
         let mut session = Session::default();
-        session.mark("a", Source::Ski);
+        session.mark_recommended("a", 0.95);
         let hits = vec![hit("a", 0.90, 0.0), hit("b", 0.50, 0.0)];
         assert!(select(hits, &cfg, &session).is_empty());
+    }
+
+    #[test]
+    fn select_repeats_on_rise_into_high() {
+        // A skill shown earlier at medium confidence is re-recommended when a
+        // later prompt makes it a strong match.
+        let cfg = Config::default();
+        let mut session = Session::default();
+        session.mark_recommended("a", 0.60); // earlier: medium
+        let hits = vec![hit("a", 0.90, 0.0)]; // now: cosine 0.90 -> high
+        let got: Vec<String> = select(hits, &cfg, &session)
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(got, ["a"]);
     }
 
     #[test]

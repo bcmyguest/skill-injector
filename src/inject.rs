@@ -10,16 +10,25 @@
 //! next one would overflow (the first block is always allowed so a single large
 //! skill still gets injected).
 
+use crate::confidence::{self, Band};
 use crate::config::{InjectMode, Strength};
 use crate::index::{Entry, Index};
-use crate::rank::Hit;
 use std::fs;
 
-/// Build the injection text for `hits` and return it alongside the ids actually
+/// A skill chosen for injection: its id and the confidence we'll display. The
+/// hook computes these (stage-appropriate confidence + dedup) and hands them to
+/// [`build`]; tests construct them directly.
+#[derive(Clone, Debug)]
+pub struct Rec {
+    pub id: String,
+    pub confidence: f32,
+}
+
+/// Build the injection text for `recs` and return it alongside the ids actually
 /// injected (after the char budget is applied). `strength` must already be
 /// resolved (not [`Strength::Auto`]); `Auto` is treated as `Soft`.
 pub fn build(
-    hits: &[Hit],
+    recs: &[Rec],
     index: &Index,
     mode: InjectMode,
     strength: Strength,
@@ -29,12 +38,12 @@ pub fn build(
     let mut ids: Vec<String> = Vec::new();
     let mut used = 0usize;
 
-    for h in hits {
-        let Some(entry) = index.get(&h.id) else {
+    for r in recs {
+        let Some(entry) = index.get(&r.id) else {
             continue;
         };
         let block = match mode {
-            InjectMode::Directive => directive_block(entry, strength),
+            InjectMode::Directive => directive_block(entry, strength, r.confidence),
             InjectMode::Body => body_block(entry),
         };
         if !blocks.is_empty() && used + block.len() > char_budget {
@@ -42,7 +51,7 @@ pub fn build(
         }
         used += block.len();
         blocks.push(block);
-        ids.push(h.id.clone());
+        ids.push(r.id.clone());
     }
 
     if blocks.is_empty() {
@@ -51,29 +60,29 @@ pub fn build(
 
     let header = match mode {
         InjectMode::Directive => {
-            "The following skills are likely relevant to this request. Invoke each \
-             relevant one with the `Skill` tool using its name below — do NOT just \
-             read the file, as reading bypasses skill loading and tracking. (Pass the \
-             bare name, or your harness's `plugin:name` form if it requires one.) Read \
-             the listed path directly only if your environment has no `Skill` tool:"
+            "Skill matches for this request (confidence 0–1 from a local matcher). \
+             Invoke fitting ones via the `Skill` tool by name — do not Read the files:"
         }
         InjectMode::Body => "Skill instructions relevant to this request are included below:",
     };
     (format!("{header}\n\n{}", blocks.join("\n\n")), ids)
 }
 
-fn directive_block(entry: &Entry, strength: Strength) -> String {
-    match strength {
-        Strength::Hard => format!(
-            "- **{}** — {}\n  You MUST invoke this skill before responding: `Skill` with skill `{}` (source: {})",
-            entry.name, entry.description, entry.name, entry.path
-        ),
-        // Soft, and Auto defensively (callers resolve Auto upstream).
-        _ => format!(
-            "- **{}** — {}\n  If relevant, invoke it: `Skill` with skill `{}` (source: {})",
-            entry.name, entry.description, entry.name, entry.path
-        ),
-    }
+/// One directive line: a distinctive `SkillRecommendation(name, conf)` token, the
+/// description, then a verb scaled by confidence band (and harder under
+/// [`Strength::Hard`] for weak local choosers).
+fn directive_block(entry: &Entry, strength: Strength, confidence: f32) -> String {
+    let verb = match (strength, confidence::band(confidence)) {
+        (Strength::Hard, Band::High) => "you MUST invoke it before responding.",
+        (Strength::Hard, _) => "invoke it before responding if it fits.",
+        (_, Band::High) => "invoke it.",
+        (_, Band::Medium) => "use if it fits.",
+        (_, Band::Low) => "possibly relevant.",
+    };
+    format!(
+        "- SkillRecommendation(`{}`, {:.2}): {} — {}",
+        entry.name, confidence, entry.description, verb
+    )
 }
 
 fn body_block(entry: &Entry) -> String {
@@ -130,13 +139,10 @@ mod tests {
         }
     }
 
-    fn hit(id: &str) -> Hit {
-        Hit {
+    fn rec(id: &str, confidence: f32) -> Rec {
+        Rec {
             id: id.to_string(),
-            name: id.to_string(),
-            cosine: 0.5,
-            keyword: 0.0,
-            score: 0.5,
+            confidence,
         }
     }
 
@@ -144,22 +150,42 @@ mod tests {
     fn directive_soft_vs_hard() {
         let idx = index_of(vec![entry("a", "alpha", "/p/SKILL.md")]);
         let (soft, _) = build(
-            &[hit("a")],
+            &[rec("a", 0.91)],
             &idx,
             InjectMode::Directive,
             Strength::Soft,
             6000,
         );
         let (hard, _) = build(
-            &[hit("a")],
+            &[rec("a", 0.91)],
             &idx,
             InjectMode::Directive,
             Strength::Hard,
             6000,
         );
-        assert!(soft.contains("alpha") && soft.contains("/p/SKILL.md"));
+        // The distinctive token and confidence are shown; the source path is not.
+        assert!(soft.contains("SkillRecommendation(`alpha`, 0.91)"));
+        assert!(!soft.contains("/p/SKILL.md"));
         assert!(!soft.contains("MUST"));
-        assert!(hard.contains("MUST"));
+        assert!(hard.contains("MUST")); // high-confidence hard directive
+    }
+
+    #[test]
+    fn directive_verb_scales_with_band() {
+        let idx = index_of(vec![entry("a", "alpha", "/p/SKILL.md")]);
+        let soft = |c| {
+            build(
+                &[rec("a", c)],
+                &idx,
+                InjectMode::Directive,
+                Strength::Soft,
+                6000,
+            )
+            .0
+        };
+        assert!(soft(0.95).contains("invoke it."));
+        assert!(soft(0.70).contains("use if it fits."));
+        assert!(soft(0.40).contains("possibly relevant."));
     }
 
     #[test]
@@ -170,7 +196,7 @@ mod tests {
         ]);
         // Budget of 1 still emits the first block, never the second.
         let (text, ids) = build(
-            &[hit("a"), hit("b")],
+            &[rec("a", 0.9), rec("b", 0.9)],
             &idx,
             InjectMode::Directive,
             Strength::Soft,
@@ -184,7 +210,7 @@ mod tests {
     fn unknown_id_skipped() {
         let idx = index_of(vec![entry("a", "alpha", "/p/SKILL.md")]);
         let (_, ids) = build(
-            &[hit("missing"), hit("a")],
+            &[rec("missing", 0.9), rec("a", 0.9)],
             &idx,
             InjectMode::Directive,
             Strength::Soft,
@@ -194,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_hits_yield_empty() {
+    fn empty_recs_yield_empty() {
         let idx = index_of(vec![]);
         let (text, ids) = build(&[], &idx, InjectMode::Directive, Strength::Soft, 6000);
         assert!(text.is_empty() && ids.is_empty());

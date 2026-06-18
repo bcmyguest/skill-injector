@@ -8,8 +8,8 @@
 
 use crate::hook::Host;
 use crate::index::Index;
-use crate::paths;
-use crate::session::{Session, Source};
+use crate::session::Session;
+use crate::{paths, telemetry};
 use serde::Deserialize;
 use std::io::Read;
 use std::path::Path;
@@ -61,8 +61,15 @@ fn observe(host: Host) -> anyhow::Result<()> {
 
     let path = paths::session_path(&ev.session_id);
     let mut session = Session::load(&path);
-    session.mark(&id, Source::Model);
+    session.mark_used(&id);
     let _ = session.save(&path); // best-effort: state IO never blocks.
+
+    let via = if ev.tool_name.eq_ignore_ascii_case("Read") {
+        "read"
+    } else {
+        "skill"
+    };
+    telemetry::record_use(&ev.session_id, &id, via);
     Ok(())
 }
 

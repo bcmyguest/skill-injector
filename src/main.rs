@@ -7,7 +7,7 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::{self, Host};
 use ski::index::{self, Index};
-use ski::{init, observe, paths, rank, rerank, session_start, skill};
+use ski::{history, init, observe, paths, rank, rerank, session_start, skill};
 
 #[derive(Parser)]
 #[command(
@@ -66,6 +66,15 @@ enum Cmd {
         #[arg(short = 'g', long)]
         global: bool,
     },
+    /// Aggregate the opt-in telemetry log (recommendations vs. actual use). Empty
+    /// unless hooks ran with `SKI_TELEMETRY=1`.
+    History,
+    /// Wipe per-session dedup state (re-arm injection for testing).
+    Clear {
+        /// Also truncate the telemetry log.
+        #[arg(long)]
+        telemetry: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -77,6 +86,8 @@ fn main() -> Result<()> {
         Cmd::Observe { host } => observe::run(host.parse::<Host>()?),
         Cmd::SessionStart { host } => session_start::run(host.parse::<Host>()?),
         Cmd::Init { host, global } => init::run(host.parse::<Host>()?, global),
+        Cmd::History => history::run(),
+        Cmd::Clear { telemetry } => history::clear(telemetry),
     }
 }
 

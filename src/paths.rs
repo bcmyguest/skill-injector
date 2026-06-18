@@ -86,6 +86,12 @@ pub fn sessions_dir() -> PathBuf {
     state_dir().join("sessions")
 }
 
+/// Opt-in telemetry event log (append-only JSONL). Written only when
+/// `SKI_TELEMETRY` is truthy; read by `ski history`. See [`crate::telemetry`].
+pub fn telemetry_path() -> PathBuf {
+    state_dir().join("telemetry.jsonl")
+}
+
 /// State file for a single conversation. The id is sanitized so a hostile or
 /// odd session id can't escape the sessions directory.
 pub fn session_path(session_id: &str) -> PathBuf {
