@@ -14,6 +14,21 @@
 //!
 //! Feature-gated: without `fastembed`, [`rerank`] returns `None` and the caller
 //! keeps the stage-1 result — identical behaviour to before this stage existed.
+//!
+//! **Rejected experiment — mean-centering the bi-encoder space.** The classic
+//! anisotropy fix (subtract the corpus-mean embedding from the query and every
+//! skill vector before cosine, then renormalize) was implemented and measured
+//! against `examples/eval` across all three fixtures. It *did* sharpen stage 1 —
+//! stage-1 top-1 rose (e.g. 75% -> 84% on the anthropic set) and recall@`rerank_top_k`
+//! went 98% -> 100% (it recovered the one true retrieval miss) — but the final,
+//! post-rerank recall *regressed* ~3 points (93/106 -> 91/106) at equal false-inject,
+//! across a min_similarity sweep. The reason is the finding `examples/eval`'s
+//! recall@k instrumentation made explicit: retrieval is not the bottleneck (gold is
+//! almost always already in the top-k), so a sharper bi-encoder is largely redundant
+//! with this reranker, while the shifted cosine distribution disrupts the gate it
+//! feeds. Not worth the added complexity, the new persisted `mean`, and the forced
+//! reindex. Revisit only if the reranker is removed or the live distribution proves
+//! materially different from the eval corpus.
 
 use crate::config::Config;
 use crate::index::Index;
