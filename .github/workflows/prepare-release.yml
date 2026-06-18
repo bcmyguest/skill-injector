@@ -69,7 +69,10 @@ jobs:
         if: ${{ !inputs.dry_run }}
       - name: Sync Cargo.lock
         if: ${{ !inputs.dry_run }}
-        run: cargo update -p ski --precise "${{ steps.ver.outputs.version }}" --offline
+        # Not --offline: this job runs no prior build, so the registry index is
+        # cold and `cargo update` must fetch it to re-resolve the lockfile after
+        # the version bump (otherwise: "no matching package named `anyhow`").
+        run: cargo update -p ski --precise "${{ steps.ver.outputs.version }}"
 
       - name: Verify lockstep
         if: ${{ !inputs.dry_run }}
