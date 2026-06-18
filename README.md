@@ -139,6 +139,12 @@ ski init -g claude            # wire ski's hooks into ~/.claude/settings.json (o
 ski index                     # build the index at $XDG_DATA_HOME/ski/index.json
 ski why "credit Claude in this commit" --top 5   # ranked skills + scores (tuning aid)
 
+# Telemetry readout (needs telemetry = true, or SKI_TELEMETRY=1, while hooks ran):
+ski history                   # aggregate: recommended vs. actually-used, top false positives/misses
+ski history --tail 20         # the last 20 calls individually: prompt, per-candidate confidence, used?
+ski history --tail 20 --session conv-abc   # ...filtered to one conversation
+ski clear                     # re-arm injection (wipe per-session dedup); --telemetry also wipes the log
+
 # Hook hot-path (stdin event -> injection JSON on stdout):
 echo '{"session_id":"s1","cwd":".","prompt":"credit Claude in this commit"}' \
   | ski hook --host claude     # -> {"hookSpecificOutput":{...,"additionalContext":...}}

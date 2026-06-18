@@ -1,7 +1,11 @@
-//! `ski history` — aggregate the opt-in telemetry log into a calibration
-//! readout, and `ski clear` — wipe per-session dedup state (and optionally the
-//! log). Read-only over [`crate::telemetry`]'s JSONL; tolerant of malformed
-//! lines (skips them) so a partially-written log still reports.
+//! `ski history` — read the opt-in telemetry log. Two views over the same JSONL:
+//! the default **aggregate** calibration readout (recommendations vs. actual
+//! use), and a `--tail N` **per-event** listing that shows each recommendation's
+//! prompt, stage, every candidate's confidence, which ids were injected, and
+//! whether each injected skill was then used in that session — the view you want
+//! when iterating on matcher quality. `ski clear` wipes per-session dedup state
+//! (and optionally the log). All read-only and tolerant of malformed lines
+//! (skips them) so a partially-written log still reports.
 
 use crate::paths;
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +29,97 @@ pub struct Stats {
     pub fp_by_skill: BTreeMap<String, u64>,
     /// skill id -> how many sessions used-but-unrecommended.
     pub miss_by_skill: BTreeMap<String, u64>,
+}
+
+/// One candidate skill with its shown confidence, for the per-event listing.
+#[derive(Debug, PartialEq)]
+pub struct Cand {
+    pub id: String,
+    pub confidence: f32,
+}
+
+/// A single `recommend` event, fully parsed for the `--tail` listing.
+#[derive(Debug, PartialEq)]
+pub struct RecEvent {
+    pub ts: u128,
+    pub session: String,
+    pub stage: String,
+    pub prompt: String,
+    /// Every candidate that cleared the gate.
+    pub candidates: Vec<Cand>,
+    /// The subset that fit the char budget and was actually injected.
+    pub injected: Vec<Cand>,
+}
+
+/// Parse every `recommend` event in log order (oldest first), keeping full
+/// per-event detail. Pure; the listing view joins these against [`used_by_session`].
+pub fn recommend_events(log: &str) -> Vec<RecEvent> {
+    let mut out = Vec::new();
+    for line in log.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("kind").and_then(|k| k.as_str()) != Some("recommend") {
+            continue;
+        }
+        out.push(RecEvent {
+            ts: v.get("ts").and_then(|t| t.as_u64()).unwrap_or(0) as u128,
+            session: str_field(&v, "session"),
+            stage: str_field(&v, "stage"),
+            prompt: str_field(&v, "prompt"),
+            candidates: parse_cands(v.get("candidates")),
+            injected: parse_cands(v.get("injected")),
+        });
+    }
+    out
+}
+
+/// Per-session set of skill ids the model loaded itself (from `use` events), so
+/// the listing can mark each injected candidate used vs. unused. Pure.
+pub fn used_by_session(log: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut used: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for line in log.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if v.get("kind").and_then(|k| k.as_str()) != Some("use") {
+            continue;
+        }
+        if let Some(skill) = v.get("skill").and_then(|s| s.as_str()) {
+            used.entry(str_field(&v, "session"))
+                .or_default()
+                .insert(skill.to_string());
+        }
+    }
+    used
+}
+
+fn str_field(v: &serde_json::Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn parse_cands(v: Option<&serde_json::Value>) -> Vec<Cand> {
+    v.and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let id = item.get("id")?.as_str()?.to_string();
+                    let confidence = item
+                        .get("confidence")
+                        .and_then(|c| c.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    Some(Cand { id, confidence })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Aggregate raw JSONL log text. Pure, so it is unit-testable without IO.
@@ -92,8 +187,10 @@ pub fn aggregate(log: &str) -> Stats {
     stats
 }
 
-/// `ski history`: aggregate and print.
-pub fn run() -> anyhow::Result<()> {
+/// `ski history`: read the telemetry log. With `tail`, list that many recent
+/// recommendation events individually; otherwise print the aggregate readout.
+/// `session` filters the listing to sessions whose id contains the substring.
+pub fn run(tail: Option<usize>, session: Option<&str>) -> anyhow::Result<()> {
     let path = paths::telemetry_path();
     let Ok(log) = fs::read_to_string(&path) else {
         println!(
@@ -102,7 +199,59 @@ pub fn run() -> anyhow::Result<()> {
         );
         return Ok(());
     };
-    let s = aggregate(&log);
+    match tail {
+        Some(n) => print_events(&log, n, session),
+        None => print_aggregate(&log),
+    }
+    Ok(())
+}
+
+/// Render the last `n` recommendation events with full per-call detail.
+fn print_events(log: &str, n: usize, session_filter: Option<&str>) {
+    let used = used_by_session(log);
+    let mut events = recommend_events(log);
+    if let Some(sf) = session_filter {
+        events.retain(|e| e.session.contains(sf));
+    }
+    if events.is_empty() {
+        println!("no recommendation events");
+        return;
+    }
+    let total = events.len();
+    let start = total.saturating_sub(n);
+    println!("showing {} of {total} recommendation events", total - start);
+    let now = now_ms();
+    let empty = BTreeSet::new();
+    for e in &events[start..] {
+        let used_here = used.get(&e.session).unwrap_or(&empty);
+        let injected_ids: BTreeSet<&str> = e.injected.iter().map(|c| c.id.as_str()).collect();
+        println!(
+            "\n{}  session {}  stage {}",
+            ago(e.ts, now),
+            short(&e.session),
+            if e.stage.is_empty() { "?" } else { &e.stage },
+        );
+        println!("  prompt: {}", truncate(&e.prompt, 120));
+        for c in &e.injected {
+            let mark = if used_here.contains(&c.id) {
+                "used"
+            } else {
+                "unused"
+            };
+            println!("  -> {:<26} {:.2}  {mark}", c.id, c.confidence);
+        }
+        // Candidates that cleared the gate but lost to the char budget.
+        for c in &e.candidates {
+            if !injected_ids.contains(c.id.as_str()) {
+                println!("     {:<26} {:.2}  (over budget)", c.id, c.confidence);
+            }
+        }
+    }
+}
+
+/// The aggregate calibration readout (the default `ski history` view).
+fn print_aggregate(log: &str) {
+    let s = aggregate(log);
     println!(
         "events: {} recommend, {} use across {} sessions",
         s.recommend_events, s.use_events, s.sessions
@@ -121,7 +270,6 @@ pub fn run() -> anyhow::Result<()> {
     );
     print_top("top false positives", &s.fp_by_skill);
     print_top("top recall misses", &s.miss_by_skill);
-    Ok(())
 }
 
 /// `ski clear`: wipe per-session dedup state; with `telemetry`, also the log.
@@ -146,6 +294,46 @@ pub fn clear(telemetry: bool) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Human-readable age of an event timestamp. `?` for missing/future stamps.
+fn ago(ts_ms: u128, now_ms: u128) -> String {
+    if ts_ms == 0 || ts_ms > now_ms {
+        return "?".to_string();
+    }
+    let secs = (now_ms - ts_ms) / 1000;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// First 8 chars of a session id — enough to eyeball-group events.
+fn short(session: &str) -> String {
+    session.chars().take(8).collect()
+}
+
+/// One-line, length-capped prompt for the listing.
+fn truncate(s: &str, max: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= max {
+        s
+    } else {
+        let cut: String = s.chars().take(max).collect();
+        format!("{cut}…")
+    }
 }
 
 fn pct(n: u64, d: u64) -> String {
@@ -211,5 +399,56 @@ not json, should be skipped
     fn pct_guards_zero() {
         assert_eq!(pct(0, 0), "0%");
         assert_eq!(pct(1, 2), "50%");
+    }
+
+    const DETAIL_LOG: &str = r#"
+{"ts":1000,"kind":"recommend","session":"sess-abcdef-1","stage":"cosine","prompt":"make a pdf","candidates":[{"id":"pdf","confidence":0.8},{"id":"docx","confidence":0.4}],"injected":[{"id":"pdf","confidence":0.8}]}
+{"ts":2000,"kind":"use","session":"sess-abcdef-1","skill":"pdf","via":"skill"}
+{"ts":3000,"kind":"recommend","session":"other-2","stage":"rerank","prompt":"line1\nline2","candidates":[{"id":"xlsx","confidence":0.5}],"injected":[{"id":"xlsx","confidence":0.5}]}
+garbage
+"#;
+
+    #[test]
+    fn recommend_events_parses_detail() {
+        let evs = recommend_events(DETAIL_LOG);
+        assert_eq!(evs.len(), 2);
+        let first = &evs[0];
+        assert_eq!(first.ts, 1000);
+        assert_eq!(first.session, "sess-abcdef-1");
+        assert_eq!(first.stage, "cosine");
+        assert_eq!(first.prompt, "make a pdf");
+        assert_eq!(first.candidates.len(), 2);
+        assert_eq!(
+            first.injected,
+            vec![Cand {
+                id: "pdf".into(),
+                confidence: 0.8
+            }]
+        );
+    }
+
+    #[test]
+    fn used_by_session_collects_use_events() {
+        let used = used_by_session(DETAIL_LOG);
+        assert!(used.get("sess-abcdef-1").unwrap().contains("pdf"));
+        assert!(!used.contains_key("other-2"));
+    }
+
+    #[test]
+    fn ago_buckets() {
+        assert_eq!(ago(0, 10_000), "?");
+        assert_eq!(ago(20_000, 10_000), "?"); // future
+        assert_eq!(ago(9_000, 10_000), "1s ago");
+        assert_eq!(ago(0, 120_000 + 1), "?");
+        assert_eq!(ago(1_000, 121_000), "2m ago");
+        assert_eq!(ago(1_000, 7_201_000), "2h ago");
+        assert_eq!(ago(1_000, 172_801_000), "2d ago");
+    }
+
+    #[test]
+    fn truncate_caps_and_flattens() {
+        assert_eq!(truncate("a\nb", 10), "a b");
+        assert_eq!(truncate("abcdef", 3), "abc…");
+        assert_eq!(short("sess-abcdef-1"), "sess-abc");
     }
 }

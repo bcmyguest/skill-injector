@@ -72,9 +72,18 @@ enum Cmd {
         #[arg(short = 'g', long)]
         global: bool,
     },
-    /// Aggregate the opt-in telemetry log (recommendations vs. actual use). Empty
-    /// unless hooks ran with `SKI_TELEMETRY=1`.
-    History,
+    /// Read the opt-in telemetry log (recommendations vs. actual use). Default is
+    /// the aggregate readout; `--tail N` lists recent calls individually (prompt,
+    /// confidences, used?). Empty unless hooks ran with `SKI_TELEMETRY=1`.
+    History {
+        /// List the most recent N recommendation events individually instead of
+        /// the aggregate.
+        #[arg(long)]
+        tail: Option<usize>,
+        /// When listing, only events whose session id contains this substring.
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Wipe per-session dedup state (re-arm injection for testing).
     Clear {
         /// Also truncate the telemetry log.
@@ -92,7 +101,7 @@ fn main() -> Result<()> {
         Cmd::Observe { host } => observe::run(host.parse::<Host>()?),
         Cmd::SessionStart { host } => session_start::run(host.parse::<Host>()?),
         Cmd::Init { host, global } => init::run(host.parse::<Host>()?, global),
-        Cmd::History => history::run(),
+        Cmd::History { tail, session } => history::run(tail, session.as_deref()),
         Cmd::Clear { telemetry } => history::clear(telemetry),
     }
 }
