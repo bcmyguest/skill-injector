@@ -155,11 +155,12 @@ impl Config {
             // `rerank_min` alone can't catch every false inject: on a richer corpus
             // a no-match prompt's reranked logit interleaves with genuine weak
             // matches, so no scalar separates them. The complementary lever is the
-            // stage-1 *agreement* gate in `rerank::passes` — a reranked skill must
-            // also clear `min_similarity` on its bi-encoder score, i.e. the reranker
-            // may reorder the retrieved-relevant set but not resurrect a skill stage-1
-            // judged irrelevant. That cut false injects a further ~67% (3 -> 1 on the
-            // 52-negative realistic corpus) at no extra compute. See `examples/eval`.
+            // stage-1 *agreement* gate in `rerank::passes` — a reranked skill's
+            // bi-encoder score must sit within a small slack of `min_similarity`,
+            // i.e. the reranker may reorder the retrieved-relevant set but not
+            // resurrect a skill stage-1 judged irrelevant. That cut false injects a
+            // further ~67% (3 -> 1 on the 52-negative realistic corpus) at no extra
+            // compute, holding recall at 95%. See `rerank::AGREEMENT_SLACK`, `examples/eval`.
             recall_floor: 0.50,
             high_conf: 2.0,
             clear_gap: 0.12,
