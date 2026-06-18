@@ -20,6 +20,7 @@ impl FastEmbedder {
     pub fn try_for(model: &str) -> anyhow::Result<Option<Self>> {
         let (em, bge) = match model {
             "bge-small-en-v1.5" => (EmbeddingModel::BGESmallENV15, true),
+            "bge-base-en-v1.5" => (EmbeddingModel::BGEBaseENV15, true),
             "all-MiniLM-L6-v2-q" => (EmbeddingModel::AllMiniLML6V2Q, false),
             "all-MiniLM-L6-v2" => (EmbeddingModel::AllMiniLML6V2, false),
             _ => return Ok(None),

@@ -1,0 +1,68 @@
+# Prompts for a REALISTIC combined index: 17 popular skills from skills.sh
+# (highest-install, tool/proper-noun heavy) UNIONed with the 17 anthropic skills.
+# Purpose: judge over-injection + reranker calibration against a realistic
+# distractor set, not the artificially narrow 17-skill anthropic library.
+#
+# Run with both roots on SKI_ROOTS (colon-separated):
+#   SKI_ROOTS="/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
+#     PROMPTS=popular_skills_prompts.tsv ./run-anthropic-prompts.sh -g
+#
+# Format: <expected-skill-id>\t<kind>\t<prompt>
+#   kind = direct / task / confusable / negative / borderline
+#   borderline = tool/proper-noun prompt that WAS a negative in the narrow corpus
+#                but plausibly matches a popular skill now — observe, don't assert.
+
+# --- popular-skill positives ----------------------------------------------
+vercel-react-best-practices	direct	optimize the render performance of my Next.js React components
+vercel-react-best-practices	task	my React app re-renders too much, make it faster the Vercel way
+azure-kubernetes	direct	create a production-ready Azure AKS cluster with the right SKU
+firebase-security-rules-auditor	direct	audit my Firestore security rules for vulnerabilities
+neon-postgres	direct	set up a Neon serverless postgres database for my app
+python-performance-optimization	direct	profile and speed up my slow Python code with cProfile
+python-testing-patterns	direct	write pytest fixtures and mocks for my unit tests
+database-migration	task	run a zero-downtime schema migration with a rollback plan
+terraform-module-library	direct	build a reusable terraform module for AWS infrastructure
+terraform-test	direct	write a .tftest.hcl test with run blocks for my terraform
+prisma-database-setup	direct	configure Prisma with PostgreSQL for a new project
+clerk-testing	direct	e2e test my Clerk auth flow with Playwright
+docker-expert	task	harden and optimize the security of my Docker container
+multi-stage-dockerfile	direct	create an optimized multi-stage Dockerfile for my Go service
+swiftui-pro	direct	review my SwiftUI code for modern API best practices
+kubernetes-specialist	direct	write a kubernetes deployment manifest with pod security policies
+
+# --- confusables (two installed skills legitimately compete) ---------------
+terraform-test	confusable	test my terraform infrastructure code
+python-testing-patterns	confusable	set up a python test suite with good coverage
+multi-stage-dockerfile	confusable	write a Dockerfile that builds a small final image
+
+# --- borderline (former narrow-corpus negatives; may match a popular skill) -
+vercel-react-best-practices	borderline	scaffold a new React project with Vite and pnpm
+python-testing-patterns	borderline	run a pyrefly type check on the python package
+python-performance-optimization	borderline	bootstrap a python project with uv and pyright
+
+# --- true negatives: realistic programming prompts that match NO installed
+#     skill. Any injection here is a real false positive (noise to the LLM).
+#     Domains chosen to avoid the installed skill set (C/C++/Java/algorithms/
+#     CS-fundamentals/generic-JS/dev-environment), sourced from common dev asks.
+# dev-environment / tooling noise (the proper-noun class that over-injects)
+(none)	negative	bump the version with git-cliff and tag the release
+(none)	negative	configure lemonade-server on my Strix Halo box
+(none)	negative	add an ansible role to install ripgrep
+(none)	negative	install neovim plugins with lazy.nvim
+(none)	negative	configure tmux to use vi keybindings
+(none)	negative	set up a systemd timer to rotate logs nightly
+# everyday programming / debugging / algorithms (no matching skill)
+(none)	negative	why does my recursive function hit a stack overflow
+(none)	negative	write a binary search over a sorted array in Java
+(none)	negative	fix this off-by-one error in my for loop
+(none)	negative	convert this callback-based code to use promises
+(none)	negative	why am I getting a segmentation fault in my C program
+(none)	negative	write a regex to validate an email address
+(none)	negative	explain the difference between a stack and a queue
+(none)	negative	implement a debounce function in vanilla JavaScript
+(none)	negative	reverse a singly linked list in place
+(none)	negative	fix the memory leak in this C++ destructor
+(none)	negative	what is the time complexity of this nested loop
+(none)	negative	merge two sorted arrays into one sorted array
+(none)	negative	format a date as ISO 8601 in JavaScript
+(none)	negative	explain how a hash map handles collisions

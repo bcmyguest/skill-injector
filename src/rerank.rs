@@ -101,8 +101,10 @@ mod fast {
         static MODEL: OnceLock<Option<TextRerank>> = OnceLock::new();
         MODEL
             .get_or_init(|| {
-                // JINA turbo: on the anthropic/skills corpus it beat bge-reranker
-                // -base on both top-1 accuracy and latency (266ms vs 2.8s load).
+                // JINA turbo: on a realistic ~48-skill index it ties the 7x-larger
+                // bge-reranker-base and jina-v2-base on top-1 accuracy and false-
+                // injection rate, at a fraction of the load/latency cost. The gate
+                // (`rerank_min`), not reranker size, is what controls noise here.
                 TextRerank::try_new(
                     RerankInitOptions::new(RerankerModel::JINARerankerV1TurboEn)
                         .with_cache_dir(crate::paths::model_cache_dir())

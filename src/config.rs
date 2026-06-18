@@ -125,9 +125,9 @@ impl Config {
             directive_strength: Strength::Auto,
             deny: Vec::new(),
             force: Vec::new(),
-            // Reranker gate + thresholds, calibrated on the anthropic/skills
-            // corpus against the JINA turbo reranker (see `examples/rerank_probe`).
-            // Scoped top-1 accuracy: 76% stage-1 only -> 88% with reranking.
+            // Reranker gate + thresholds, calibrated against the JINA turbo
+            // reranker (see `examples/rerank_probe`). Stage-1 top-1 accuracy: 76%
+            // stage-1 only -> 88% with reranking.
             //
             // `recall_floor` skips the reranker when nothing is plausibly relevant.
             // bge is anisotropic (unrelated prompts still cosine ~0.5), which
@@ -136,11 +136,21 @@ impl Config {
             // disabled (2.0): a confidence-based skip measurably *hurt* accuracy,
             // because the bi-encoder is confidently wrong on the confusable pairs
             // the reranker exists to fix. It is retained as a tunable, not removed.
+            //
+            // `rerank_min` was re-tuned on a realistic ~48-skill index (17 anthropic
+            // + 31 highest-installed community skills from skills.sh; see
+            // `tests/data/popular_skills_prompts.tsv`). The old -2.5 was set on the
+            // artificially narrow 17-skill anthropic library, where indirect prompts
+            // had no good match and scored like noise. On a realistic index real
+            // matches score >= -1.03 and unrelated programming prompts cluster
+            // <= -1.6, so -1.5 cuts false injections ~80% (5 -> 1 on the corpus)
+            // with zero top-1 loss (19/19 positives kept). Larger embedders/rerankers
+            // (bge-base, jina-v2) tie this at higher cost, so the gate is the lever.
             recall_floor: 0.50,
             high_conf: 2.0,
             clear_gap: 0.12,
             rerank_top_k: 12,
-            rerank_min: -2.5,
+            rerank_min: -1.5,
             rerank_margin: 2.0,
         }
     }
