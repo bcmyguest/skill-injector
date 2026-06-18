@@ -4,8 +4,11 @@
 //! `tests/data/run-anthropic-prompts.sh`), runs the *real* two-stage decision
 //! (stage-1 cosine, or stage-2 rerank when ambiguous) for every labelled prompt,
 //! and reports a confusion matrix: recall on positives, false-positive rate on
-//! negatives. Per-prompt score dumps (`-v`) expose the distributions the gate is
-//! tuned against.
+//! negatives. It also reports the stage-1 retrieval ceiling — recall@`rerank_top_k`
+//! and top-1 over positives, before any rerank/threshold gating — so you can tell
+//! whether a miss is a retrieval failure (gold never reached the reranker) or a
+//! ranking failure (gold was retrieved but the gate dropped it). Per-prompt score
+//! dumps (`-v`) expose the distributions the gate is tuned against.
 //!
 //! Usage (point SKI_ROOTS at the eval index — colon-separated union is fine):
 //!   SKI_ROOTS="/var/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
@@ -114,6 +117,13 @@ fn main() -> anyhow::Result<()> {
     let (mut n_pos, mut n_neg) = (0u32, 0u32);
     let mut fp_rows: Vec<String> = Vec::new();
     let mut fn_rows: Vec<String> = Vec::new();
+    // Stage-1 retrieval ceiling (pre-rerank), over positives only: recall@k is the
+    // fraction whose gold skill survives into the top-`rerank_top_k` candidates the
+    // reranker is fed (`rerank::rerank` takes exactly that many); top-1 is the
+    // fraction already ranked first by hybrid score. recall@k ~100% means retrieval
+    // is not the bottleneck and the problem is ranking within the retrieved set.
+    let (mut recall_at_k, mut stage1_top1) = (0u32, 0u32);
+    let mut recall_miss_rows: Vec<String> = Vec::new();
 
     for c in &cases {
         let query = embedder
@@ -168,6 +178,23 @@ fn main() -> anyhow::Result<()> {
             }
         } else {
             n_pos += 1;
+            // Stage-1 ceiling: where does the gold skill land in the full hybrid
+            // ranking, before any rerank/threshold gating?
+            let rank = hits.iter().position(|h| h.id == c.want);
+            if rank == Some(0) {
+                stage1_top1 += 1;
+            }
+            if rank.is_some_and(|r| r < cfg.rerank_top_k) {
+                recall_at_k += 1;
+            } else {
+                recall_miss_rows.push(format!(
+                    "  R@k MISS [{:<10}] want={} stage-1 rank={} :: {}",
+                    c.kind,
+                    c.want,
+                    rank.map_or_else(|| "absent".to_string(), |r| r.to_string()),
+                    c.prompt
+                ));
+            }
             if ids.iter().any(|id| id == &c.want) {
                 tp += 1;
             } else {
@@ -192,6 +219,19 @@ fn main() -> anyhow::Result<()> {
         "negatives {n_neg}: false-inject {fp}/{n_neg} ({:.0}%)   clean {tn}",
         pct(fp, n_neg)
     );
+    println!(
+        "stage-1 (pre-rerank, k={}): recall@k {recall_at_k}/{n_pos} ({:.0}%)   top-1 {stage1_top1}/{n_pos} ({:.0}%)",
+        cfg.rerank_top_k,
+        pct(recall_at_k, n_pos),
+        pct(stage1_top1, n_pos),
+    );
+    if !recall_miss_rows.is_empty() {
+        println!(
+            "--- stage-1 recall@k misses (gold below top-{}) ---",
+            cfg.rerank_top_k
+        );
+        recall_miss_rows.iter().for_each(|r| println!("{r}"));
+    }
     if !fn_rows.is_empty() {
         println!("--- recall misses ---");
         fn_rows.iter().for_each(|r| println!("{r}"));
