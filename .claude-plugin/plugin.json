@@ -1,5 +1,7 @@
 {
   "name": "skill-inject",
-  "version": "0.3.0",
-  "author": { "name": "ski contributors" }
+  "version": "0.4.0",
+  "author": {
+    "name": "ski contributors"
+  }
 }
