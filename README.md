@@ -200,19 +200,25 @@ Advanced ranking knobs are also accepted: `keyword_boost`, `recall_floor`, `high
 
 ```
 prompt ─▶ adapter (Claude hook / opencode plugin) ─▶ ski (Rust, one binary)
-                                                        1. load index (skill vectors)
-                                                        2. embed(prompt) locally
-                                                        3. retrieve: cosine top-K (bge)
-                                                        4. rerank: cross-encoder (JINA turbo)
-                                                        5. gate: threshold + margin + deny/force
-                                                        6. dedup vs per-session ledger
-                                                        7. emit injection ─▶ adapter injects as context
+                                                        1. prefilter (skip control payloads)
+                                                        2. load index (skill vectors)
+                                                        3. embed(prompt) locally
+                                                        4. retrieve: cosine top-K (bge)
+                                                        5. rerank: cross-encoder (JINA turbo)
+                                                        6. gate: threshold + margin + deny/force + slash self-rec
+                                                        7. dedup vs per-session ledger
+                                                        8. emit injection ─▶ adapter injects as context
 ```
 
 - **Two-stage ranking.** A bge-small bi-encoder retrieves a candidate set; a JINA-turbo
   cross-encoder reranks it. Cheap O(1) query + cached vectors first, expensive pairwise
   scoring only on the short list. (Why not reranker-only: it's O(N) per prompt and loses
   the cosine early-out.)
+- **Prompt prefilter.** Host-generated control payloads (`<task-notification>`,
+  `<system-reminder>` blocks) aren't user requests, so they skip injection outright
+  rather than embedding into noise matches. A `/<name>` slash invocation is an explicit
+  skill choice, so the skill it names is never recommended back — that self-recommendation
+  was the single largest false positive in `ski history`.
 - **Per-session dedup.** A skill injected by `ski` *or* loaded by the model itself is
   recorded in a session ledger and never re-injected — until compaction re-arms it.
 - **Fail-open everywhere.** Bad stdin, a missing index, any IO error → no output, exit 0.
