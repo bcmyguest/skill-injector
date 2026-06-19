@@ -1,0 +1,48 @@
+# Multi-turn (conversational-context) corpus for query-side context enrichment.
+# Same ~47-skill realistic index as popular_skills_prompts.tsv (31 skills.sh +
+# 17 anthropic). Each row adds a 4th column: the prior conversational turns the
+# CURRENT prompt depends on, oldest-first, separated by " | ".
+#
+# Format: <expected-skill-id>\t<kind>\t<prompt>\t<prior turns | separated>
+#   kind = followup   (current prompt is vague; context disambiguates -> gold)
+#          distract   (current prompt is specific; context is off-topic noise that
+#                      must NOT break the clear match)
+#          negative   (topic switch or pure chatter; inject nothing -> (none))
+#
+# The file-type channel (file_boost) is ON by default, so the default run already
+# exercises it; both roots go on SKI_ROOTS:
+#   SKI_ROOTS="/var/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
+#     cargo run --example eval -- tests/data/context_prompts.tsv -v
+# A/B knobs (mirror SKI_PHRASE_BOOST): SKI_FILE_BOOST=0.0 for the prompt-only
+# baseline; SKI_CONTEXT_WEIGHT=0.20 to also opt in the (default-off) dense blend.
+
+# --- followups (document skills): a file is named in the context turn that
+#     "attached" it, so the file-type channel can fire on the vague current prompt ---
+pdf	followup	merge them into one file	I dropped invoice_jan.pdf, invoice_feb.pdf and invoice_mar.pdf in here
+pdf	followup	pull the text out of it	here is the scanned contract, contract_signed.pdf
+xlsx	followup	clean it up for me	attached sales_q3.xlsx — it has junk rows and merged header cells
+xlsx	followup	add a pivot summarizing revenue by region	here is quarterly_numbers.xlsx
+docx	followup	add a letterhead with my address	I am drafting cover_letter.docx in Microsoft Word
+pptx	followup	add a slide for the product roadmap	working on pitch_deck.pptx for investors
+pptx	followup	now add a closing thank-you slide	building allhands.pptx | added the intro and agenda slides
+
+# --- followups (non-document): no file extension maps to these skills, so only
+#     the conversational-context channel could help — the file channel cannot ---
+webapp-testing	followup	check that the login flow actually works	my React app is running on localhost:3000
+mcp-builder	followup	add a tool that lists open tickets	I am writing an MCP server in Python with FastMCP
+accessibility	followup	do these work with a screen reader	I am reviewing the form components on my site
+claude-api	followup	which model id is cheapest for tool calling	I am integrating the Anthropic Claude API
+database-migration	followup	write the migration to add that column	I need to change my Postgres schema to track signups
+
+# --- distract: specific prompt, off-topic context must not derail it ---
+pdf	distract	merge these three pdfs into one	earlier we set up a kubernetes cluster on azure
+xlsx	distract	add a pivot table to this .xlsx workbook	we were just talking about rust async runtimes
+docx	distract	convert this polished letter to a Word document	before this we debugged a tokio deadlock
+
+# --- negatives: topic switch or pure chatter, NO file named, inject nothing ---
+(none)	negative	what is the time complexity of quicksort	I merged some PDFs a minute ago
+(none)	negative	implement a doubly linked list in C	we cleaned up a messy spreadsheet earlier
+(none)	negative	explain the TCP three-way handshake	I was building a slide deck
+(none)	negative	what is the capital of France	I am writing an MCP server
+(none)	negative	prove that the square root of two is irrational	I was editing a Word document
+(none)	negative	do the other one now	remind me to call the dentist | book a flight to Denver

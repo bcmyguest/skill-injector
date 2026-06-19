@@ -75,6 +75,14 @@ pub struct Session {
     /// when empty, so the non-telemetry hot path leaves the file unchanged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_prompt: String,
+    /// Recent user prompts in this conversation, oldest-first, bounded. Drives
+    /// query-side context enrichment: a vague follow-up ("now do the other one")
+    /// is disambiguated by the turns that preceded it. Maintained only when the
+    /// context feature is enabled (`Config::context_depth > 0`), so the default
+    /// hot path neither writes nor carries it. `#[serde(default)]` + skip-when-empty
+    /// keeps it invisible to indexes/sessions written before it existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_prompts: Vec<String>,
     /// Unix seconds of the last write (diagnostics only).
     #[serde(default)]
     pub updated: u64,
@@ -172,10 +180,31 @@ impl Session {
         }
     }
 
+    /// Append `prompt` to the rolling context window, keeping at most `max` of the
+    /// most recent prompts (oldest dropped first). A blank prompt, or one identical
+    /// to the immediately previous entry (a resubmit), is ignored so the window
+    /// holds distinct conversational turns. `max == 0` disables the window entirely
+    /// (the feature-off path).
+    pub fn push_prompt(&mut self, prompt: &str, max: usize) {
+        let p = prompt.trim();
+        if max == 0 || p.is_empty() {
+            return;
+        }
+        if self.recent_prompts.last().map(String::as_str) == Some(p) {
+            return;
+        }
+        self.recent_prompts.push(p.to_string());
+        let len = self.recent_prompts.len();
+        if len > max {
+            self.recent_prompts.drain(0..len - max);
+        }
+    }
+
     /// Forget everything — used to re-arm on compaction so skills can be
     /// re-injected into the fresh summary.
     pub fn clear(&mut self) {
         self.loaded.clear();
+        self.recent_prompts.clear();
     }
 }
 
@@ -265,8 +294,46 @@ mod tests {
     fn clear_re_arms() {
         let mut s = Session::default();
         s.mark("a", Source::Ski);
+        s.push_prompt("set up pytest", 3);
         s.clear();
         assert!(!s.is_loaded("a"));
+        assert!(s.recent_prompts.is_empty()); // window re-armed too
+    }
+
+    #[test]
+    fn push_prompt_bounds_window_oldest_first() {
+        let mut s = Session::default();
+        for p in ["one", "two", "three", "four"] {
+            s.push_prompt(p, 3);
+        }
+        // Capped at 3, oldest ("one") dropped, order preserved.
+        assert_eq!(s.recent_prompts, ["two", "three", "four"]);
+    }
+
+    #[test]
+    fn push_prompt_ignores_blank_and_consecutive_dupes() {
+        let mut s = Session::default();
+        s.push_prompt("  ", 3); // blank -> ignored
+        s.push_prompt("set up pytest", 3);
+        s.push_prompt("set up pytest", 3); // immediate resubmit -> ignored
+        s.push_prompt("now the other one", 3);
+        assert_eq!(s.recent_prompts, ["set up pytest", "now the other one"]);
+    }
+
+    #[test]
+    fn push_prompt_zero_max_disables_window() {
+        let mut s = Session::default();
+        s.push_prompt("anything", 0);
+        assert!(s.recent_prompts.is_empty()); // feature-off: never records
+    }
+
+    #[test]
+    fn recent_prompts_absent_when_empty_in_json() {
+        // skip_serializing_if keeps the field out of the on-disk form for the
+        // default (feature-off) path, so existing readers/writers are unaffected.
+        let s = Session::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("recent_prompts"), "got {json}");
     }
 
     #[test]

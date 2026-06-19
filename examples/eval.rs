@@ -4,8 +4,11 @@
 //! `tests/data/run-anthropic-prompts.sh`), runs the *real* two-stage decision
 //! (stage-1 cosine, or stage-2 rerank when ambiguous) for every labelled prompt,
 //! and reports a confusion matrix: recall on positives, false-positive rate on
-//! negatives. Per-prompt score dumps (`-v`) expose the distributions the gate is
-//! tuned against.
+//! negatives. It also reports the stage-1 retrieval ceiling — recall@`rerank_top_k`
+//! and top-1 over positives, before any rerank/threshold gating — so you can tell
+//! whether a miss is a retrieval failure (gold never reached the reranker) or a
+//! ranking failure (gold was retrieved but the gate dropped it). Per-prompt score
+//! dumps (`-v`) expose the distributions the gate is tuned against.
 //!
 //! Usage (point SKI_ROOTS at the eval index — colon-separated union is fine):
 //!   SKI_ROOTS="/var/tmp/ski-eval/.claude/skills:$HOME/.claude/plugins/marketplaces/anthropic-agent-skills" \
@@ -19,26 +22,43 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::Host;
 use ski::rank::Hit;
-use ski::{index, rank, rerank, skill};
+use ski::{context, index, rank, rerank, skill};
 
 struct Case {
     want: String, // "(none)" for a negative
     kind: String,
     prompt: String,
+    /// Optional prior-turn context (oldest-first), from a 4th `|`-separated TSV
+    /// column. Empty for the single-prompt corpora.
+    context: Vec<String>,
 }
 
 fn parse_cases(raw: &str) -> Vec<Case> {
     raw.lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|l| {
-            let mut it = l.splitn(3, '\t');
+            let mut it = l.splitn(4, '\t');
             let want = it.next()?.trim().to_string();
             let kind = it.next()?.trim().to_string();
             let prompt = it.next()?.trim().to_string();
+            let context = it
+                .next()
+                .map(|c| {
+                    c.split('|')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
             if prompt.is_empty() {
                 return None;
             }
-            Some(Case { want, kind, prompt })
+            Some(Case {
+                want,
+                kind,
+                prompt,
+                context,
+            })
         })
         .collect()
 }
@@ -48,11 +68,11 @@ fn parse_cases(raw: &str) -> Vec<Case> {
 fn decide(
     hits: &[Hit],
     idx: &index::Index,
-    prompt: &str,
+    rerank_query: &str,
     cfg: &Config,
 ) -> (&'static str, Vec<Hit>) {
     let reranked = rerank::is_ambiguous(hits, cfg)
-        .then(|| rerank::rerank(hits, idx, prompt, cfg))
+        .then(|| rerank::rerank(hits, idx, rerank_query, cfg))
         .flatten();
     match reranked {
         Some(r) => {
@@ -95,6 +115,24 @@ fn main() -> anyhow::Result<()> {
     if let Ok(v) = std::env::var("SKI_PHRASE_BOOST") {
         cfg.phrase_boost = v.parse().expect("SKI_PHRASE_BOOST must be a float");
     }
+    // Context enrichment (Goal 3) is off by default; these env knobs activate and
+    // tune it for one run, mirroring SKI_PHRASE_BOOST, so the same corpus can be
+    // scored with and without conversational context.
+    if let Ok(v) = std::env::var("SKI_CONTEXT_DEPTH") {
+        cfg.context_depth = v.parse().expect("SKI_CONTEXT_DEPTH must be a usize");
+    }
+    if let Ok(v) = std::env::var("SKI_CONTEXT_WEIGHT") {
+        cfg.context_weight = v.parse().expect("SKI_CONTEXT_WEIGHT must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_VAGUE_LO") {
+        cfg.vague_lo = v.parse().expect("SKI_VAGUE_LO must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_VAGUE_HI") {
+        cfg.vague_hi = v.parse().expect("SKI_VAGUE_HI must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_FILE_BOOST") {
+        cfg.file_boost = v.parse().expect("SKI_FILE_BOOST must be a float");
+    }
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
@@ -114,13 +152,35 @@ fn main() -> anyhow::Result<()> {
     let (mut n_pos, mut n_neg) = (0u32, 0u32);
     let mut fp_rows: Vec<String> = Vec::new();
     let mut fn_rows: Vec<String> = Vec::new();
+    // Stage-1 retrieval ceiling (pre-rerank), over positives only: recall@k is the
+    // fraction whose gold skill survives into the top-`rerank_top_k` candidates the
+    // reranker is fed (`rerank::rerank` takes exactly that many); top-1 is the
+    // fraction already ranked first by hybrid score. recall@k ~100% means retrieval
+    // is not the bottleneck and the problem is ranking within the retrieved set.
+    let (mut recall_at_k, mut stage1_top1) = (0u32, 0u32);
+    let mut recall_miss_rows: Vec<String> = Vec::new();
 
     for c in &cases {
         let query = embedder
             .embed(std::slice::from_ref(&c.prompt), EmbedKind::Query)?
             .remove(0);
-        let hits = rank::rank_all(&query, &c.prompt, &idx, &cfg);
-        let (stage, injected) = decide(&hits, &idx, &c.prompt, &cfg);
+        let cvec = context::vector(embedder.as_ref(), &c.context, &cfg)?;
+        // File-type channel: scan this turn's prompt AND its prior context for named
+        // files (a `.xlsx` etc.), mapping each to its skill.
+        let file_text = format!("{} {}", c.context.join(" "), c.prompt);
+        let file_ids = context::file_ids(&file_text);
+        let hits = rank::rank_all_ctx(&query, cvec.as_deref(), &file_ids, &c.prompt, &idx, &cfg);
+        // The reranker reads text: enrich its query with the recent window when the
+        // prompt is vague (same gate that lets the context vector contribute).
+        let prompt_top = hits.iter().map(|h| h.cosine).fold(0.0_f32, f32::max);
+        let rerank_query = context::rerank_query(
+            &c.prompt,
+            prompt_top,
+            &c.context,
+            !file_ids.is_empty(),
+            &cfg,
+        );
+        let (stage, injected) = decide(&hits, &idx, &rerank_query, &cfg);
         let ids: Vec<String> = injected.iter().map(|h| h.id.clone()).collect();
         let is_neg = c.want == "(none)";
         let observe_only = c.kind == "borderline";
@@ -135,8 +195,8 @@ fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|h| {
                     format!(
-                        "{}=L{:.2}/cos{:.3}+kw{:.2}+ph{:.2}",
-                        h.id, h.score, h.cosine, h.keyword, h.phrase
+                        "{}=L{:.2}/cos{:.3}+ctx{:.2}+file{:.2}+kw{:.2}+ph{:.2}",
+                        h.id, h.score, h.cosine, h.context, h.file, h.keyword, h.phrase
                     )
                 })
                 .collect();
@@ -168,6 +228,23 @@ fn main() -> anyhow::Result<()> {
             }
         } else {
             n_pos += 1;
+            // Stage-1 ceiling: where does the gold skill land in the full hybrid
+            // ranking, before any rerank/threshold gating?
+            let rank = hits.iter().position(|h| h.id == c.want);
+            if rank == Some(0) {
+                stage1_top1 += 1;
+            }
+            if rank.is_some_and(|r| r < cfg.rerank_top_k) {
+                recall_at_k += 1;
+            } else {
+                recall_miss_rows.push(format!(
+                    "  R@k MISS [{:<10}] want={} stage-1 rank={} :: {}",
+                    c.kind,
+                    c.want,
+                    rank.map_or_else(|| "absent".to_string(), |r| r.to_string()),
+                    c.prompt
+                ));
+            }
             if ids.iter().any(|id| id == &c.want) {
                 tp += 1;
             } else {
@@ -192,6 +269,19 @@ fn main() -> anyhow::Result<()> {
         "negatives {n_neg}: false-inject {fp}/{n_neg} ({:.0}%)   clean {tn}",
         pct(fp, n_neg)
     );
+    println!(
+        "stage-1 (pre-rerank, k={}): recall@k {recall_at_k}/{n_pos} ({:.0}%)   top-1 {stage1_top1}/{n_pos} ({:.0}%)",
+        cfg.rerank_top_k,
+        pct(recall_at_k, n_pos),
+        pct(stage1_top1, n_pos),
+    );
+    if !recall_miss_rows.is_empty() {
+        println!(
+            "--- stage-1 recall@k misses (gold below top-{}) ---",
+            cfg.rerank_top_k
+        );
+        recall_miss_rows.iter().for_each(|r| println!("{r}"));
+    }
     if !fn_rows.is_empty() {
         println!("--- recall misses ---");
         fn_rows.iter().for_each(|r| println!("{r}"));

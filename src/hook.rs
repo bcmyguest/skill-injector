@@ -16,7 +16,7 @@ use crate::index::{self, Index};
 use crate::inject::Rec;
 use crate::rank::Hit;
 use crate::session::Session;
-use crate::{inject, paths, rank, rerank, skill, telemetry};
+use crate::{context, inject, paths, rank, rerank, skill, telemetry};
 use serde::Deserialize;
 use std::io::Read;
 use std::str::FromStr;
@@ -88,13 +88,49 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         return Ok(Decision::default());
     }
 
+    let session_path = paths::session_path(&event.session_id);
+    let mut session = Session::load(&session_path);
+
     let query = embedder
         .embed(std::slice::from_ref(&event.prompt), EmbedKind::Query)?
         .remove(0);
-    let hits = rank::rank_all(&query, &event.prompt, &idx, &cfg);
+    // Conversational context (Goal 3): the prior-turn window disambiguates a vague
+    // prompt. Built from the *previous* turns before the current prompt is pushed
+    // below; inert (no vector, no enrichment) unless the feature is enabled.
+    let cvec = context::vector(embedder.as_ref(), &session.recent_prompts, &cfg).unwrap_or(None);
+    // File-type channel: a file named in the prompt (or a recent turn that attached
+    // one) boosts its skill — the directly-attributable context signal. Empty/no-IO
+    // when the channel is off.
+    let file_ids = if cfg.file_boost > 0.0 {
+        let file_text = format!("{} {}", session.recent_prompts.join(" "), event.prompt);
+        context::file_ids(&file_text)
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let hits = rank::rank_all_ctx(
+        &query,
+        cvec.as_deref(),
+        &file_ids,
+        &event.prompt,
+        &idx,
+        &cfg,
+    );
+    let prompt_top = hits.iter().map(|h| h.cosine).fold(0.0_f32, f32::max);
+    let rerank_query = context::rerank_query(
+        &event.prompt,
+        prompt_top,
+        &session.recent_prompts,
+        !file_ids.is_empty(),
+        &cfg,
+    );
+    // Append this turn to the rolling window now that context has been built from
+    // the prior turns. Persisted immediately (best-effort) so a later vague turn
+    // sees it even if this turn injects nothing. No-op/no-IO when the feature is off.
+    if cfg.context_depth > 0 {
+        session.push_prompt(&event.prompt, cfg.context_depth);
+        let _ = session.save(&session_path);
+    }
 
-    let session_path = paths::session_path(&event.session_id);
-    let mut session = Session::load(&session_path);
     // With telemetry on, remember the active prompt now (before any early return)
     // so a self-load later in this conversation — including after a prompt that
     // injected nothing — can be tied back to it as a recall miss. One extra write
@@ -107,7 +143,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // (confident winner or nothing relevant) keep the cheap stage-1 result. The
     // stage that wins also sets which confidence mapping the recs carry.
     let (selected, stage) = match rerank::is_ambiguous(&hits, &cfg)
-        .then(|| rerank::rerank(&hits, &idx, &event.prompt, &cfg))
+        .then(|| rerank::rerank(&hits, &idx, &rerank_query, &cfg))
         .flatten()
     {
         Some(reranked) => (select_reranked(reranked, &cfg, &session), Stage::Rerank),
@@ -262,6 +298,8 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             cosine: score - keyword,
+            context: 0.0,
+            file: 0.0,
             keyword,
             phrase: 0.0,
             score,
