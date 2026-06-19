@@ -76,7 +76,16 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     if event.prompt.trim().is_empty() {
         return Ok(Decision::default());
     }
-    let _ = &event.cwd; // project-scoped config/roots arrive in a later milestone.
+    // Host-generated control payloads (task notifications, injected reminders) are
+    // not user requests; embedding them as a query only surfaces noise matches the
+    // model never acts on. Skip them outright. See `is_control_prompt`.
+    if is_control_prompt(&event.prompt) {
+        return Ok(Decision::default());
+    }
+    // A leading `/<name>` is an explicit skill invocation by the user; we must not
+    // re-recommend the very skill they just ran (it always reads as an unused
+    // false positive). Captured here, filtered out of `selected` below.
+    let invoked_skill = slash_command_id(&event.prompt);
 
     let (mut cfg, file) = Config::load(host);
     telemetry::init(cfg.telemetry); // config.toml can enable telemetry (or the env var).
@@ -107,10 +116,19 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     } else {
         std::collections::BTreeSet::new()
     };
+    // Project-type channel: the working directory's manifest (`Cargo.toml`, ...)
+    // boosts its ecosystem's skill — an ambient signal, so gated downstream on the
+    // skill's own cosine. Empty/no-IO when the channel is off.
+    let project_ids = if cfg.project_boost > 0.0 {
+        context::project_ids(&event.cwd)
+    } else {
+        std::collections::BTreeSet::new()
+    };
     let hits = rank::rank_all_ctx(
         &query,
         cvec.as_deref(),
         &file_ids,
+        &project_ids,
         &event.prompt,
         &idx,
         &cfg,
@@ -142,13 +160,18 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // Stage 2: when stage-1 is ambiguous, let the cross-encoder decide; otherwise
     // (confident winner or nothing relevant) keep the cheap stage-1 result. The
     // stage that wins also sets which confidence mapping the recs carry.
-    let (selected, stage) = match rerank::is_ambiguous(&hits, &cfg)
+    let (mut selected, stage) = match rerank::is_ambiguous(&hits, &cfg)
         .then(|| rerank::rerank(&hits, &idx, &rerank_query, &cfg))
         .flatten()
     {
         Some(reranked) => (select_reranked(reranked, &cfg, &session), Stage::Rerank),
         None => (select(hits, &cfg, &session), Stage::Cosine),
     };
+    // Drop the skill the user invoked by slash command — recommending it back is
+    // pure noise (the dominant false positive in telemetry: `/pickup` -> pickup).
+    if let Some(invoked) = &invoked_skill {
+        selected.retain(|r| &r.id != invoked);
+    }
     if selected.is_empty() {
         return Ok(Decision::default());
     }
@@ -182,6 +205,32 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         inject: text,
         skills: ids,
     })
+}
+
+/// Host-generated control payloads that arrive on the prompt channel but aren't
+/// user requests — task-completion notifications and injected reminder blocks.
+/// They are detected by a leading control tag so a genuine prompt that merely
+/// quotes one in prose still injects normally. Embedding these as a query only
+/// produces noise matches (telemetry: a `<task-notification>` blob surfaced
+/// `skill-development`/`claude-automation-recommender`, both unused).
+fn is_control_prompt(prompt: &str) -> bool {
+    let p = prompt.trim_start();
+    p.starts_with("<task-notification") || p.starts_with("<system-reminder")
+}
+
+/// The skill id a leading `/command` invokes, if the prompt is one. `/pickup` or
+/// `/pickup keep going` -> `Some("pickup")`; plain prose or a bare `/` -> `None`.
+/// A slash command is one leading token of command-name characters; anything else
+/// (a path like `/etc/hosts`, a fraction) bails so only real invocations match.
+fn slash_command_id(prompt: &str) -> Option<String> {
+    let rest = prompt.trim_start().strip_prefix('/')?;
+    let name = rest.split_whitespace().next()?;
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'));
+    // A namespaced command (`/plugin:skill`) maps to its trailing skill segment.
+    ok.then(|| name.rsplit(':').next().unwrap_or(name).to_string())
 }
 
 /// The confidence of `id` within `recs` (the value we displayed for it).
@@ -300,6 +349,7 @@ mod tests {
             cosine: score - keyword,
             context: 0.0,
             file: 0.0,
+            project: 0.0,
             keyword,
             phrase: 0.0,
             score,

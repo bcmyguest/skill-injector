@@ -1,5 +1,5 @@
 //! Hybrid ranking: cosine(query, skill-description) + context blend + file boost
-//! + keyword boost + phrase boost.
+//! + ambient project boost + keyword boost + phrase boost.
 
 use crate::config::Config;
 use crate::index::Index;
@@ -23,6 +23,12 @@ pub struct Hit {
     /// prompt or recent context. Separate for attribution — the highest-precision,
     /// directly-attributable context signal.
     pub file: f32,
+    /// Boost from the working directory's project ecosystem (see
+    /// [`crate::context::project_ids`]). Zero unless the channel is on and a
+    /// matching manifest was found; gated on `cosine >= min_similarity` so this
+    /// ambient signal only breaks ties among already-plausible skills. Separate for
+    /// attribution.
+    pub project: f32,
     pub keyword: f32,
     /// Boost from matched trigger phrases (see [`phrase_score`]).
     pub phrase: f32,
@@ -101,7 +107,15 @@ pub fn context_weight(prompt_top: f32, cfg: &Config) -> f32 {
 /// All skills, scored and sorted by descending hybrid score. No threshold — for
 /// `ski why` and as input to [`select`]. No conversational context.
 pub fn rank_all(query: &[f32], prompt: &str, index: &Index, cfg: &Config) -> Vec<Hit> {
-    rank_all_ctx(query, None, &BTreeSet::new(), prompt, index, cfg)
+    rank_all_ctx(
+        query,
+        None,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        prompt,
+        index,
+        cfg,
+    )
 }
 
 /// Like [`rank_all`], but blends an optional conversational-context vector into
@@ -115,12 +129,22 @@ pub fn rank_all(query: &[f32], prompt: &str, index: &Index, cfg: &Config) -> Vec
 /// `file_ids` carries the file-type channel: any skill whose id is in the set
 /// (a file of its type was named in the prompt/context — see
 /// [`crate::context::file_ids`]) gets a flat `cfg.file_boost`, *not* gated on
-/// vagueness, since a named file is unambiguous. With `context = None`, an empty
-/// `file_ids`, and the features disabled, this is identical to [`rank_all`].
+/// vagueness, since a named file is unambiguous.
+///
+/// `project_ids` carries the ambient project-type channel (see
+/// [`crate::context::project_ids`]): a skill whose ecosystem matches the working
+/// directory's manifest gets `cfg.project_boost`, but — because this signal is
+/// present every turn — only when the skill's own cosine already clears
+/// `cfg.min_similarity`. So it reorders among already-plausible skills and can
+/// never, on its own, lift an irrelevant skill over the injection floor.
+///
+/// With `context = None`, empty `file_ids`/`project_ids`, and the features
+/// disabled, this is identical to [`rank_all`].
 pub fn rank_all_ctx(
     query: &[f32],
     context: Option<&[f32]>,
     file_ids: &BTreeSet<String>,
+    project_ids: &BTreeSet<String>,
     prompt: &str,
     index: &Index,
     cfg: &Config,
@@ -168,6 +192,18 @@ pub fn rank_all_ctx(
             } else {
                 0.0
             };
+            // Ambient project signal: gated on the skill's own cosine clearing the
+            // injection floor, so it can only break ties among plausible skills,
+            // never rescue an irrelevant one (the failure mode the keyword channel
+            // can hit on incidental mentions).
+            let project = if cfg.project_boost > 0.0
+                && cosine >= cfg.min_similarity
+                && project_ids.contains(&e.id)
+            {
+                cfg.project_boost
+            } else {
+                0.0
+            };
             let keyword = keyword_score(prompt, &e.keywords, cfg.keyword_boost);
             let phrase = phrase_score(prompt, &e.trigger_phrases, cfg.phrase_boost);
             Hit {
@@ -176,9 +212,10 @@ pub fn rank_all_ctx(
                 cosine,
                 context,
                 file,
+                project,
                 keyword,
                 phrase,
-                score: cosine + context + file + keyword + phrase,
+                score: cosine + context + file + project + keyword + phrase,
             }
         })
         .collect();
@@ -266,7 +303,7 @@ mod tests {
         // With no context vector, scores are exactly cosine+keyword+phrase and the
         // context term is zero — identical to the pre-feature path.
         let q = [0.5, 0.5];
-        let hits = rank_all_ctx(&q, None, &no_files(), "", &idx2(), &ctx_cfg());
+        let hits = rank_all_ctx(&q, None, &no_files(), &no_files(), "", &idx2(), &ctx_cfg());
         for h in &hits {
             assert_eq!(h.context, 0.0);
             assert!((h.score - h.cosine).abs() < 1e-6);
@@ -285,7 +322,7 @@ mod tests {
         };
         let q = [0.5, 0.5]; // equal cosine to a and b
         let ctx = [1.0, 0.0]; // points at a
-        let hits = rank_all_ctx(&q, Some(&ctx), &no_files(), "", &idx2(), &cfg);
+        let hits = rank_all_ctx(&q, Some(&ctx), &no_files(), &no_files(), "", &idx2(), &cfg);
         assert_eq!(hits[0].id, "a"); // context broke the tie
         assert!(hits[0].context > 0.0);
         // `b` is no more context-relevant than average, so it gets no boost.
@@ -299,7 +336,15 @@ mod tests {
         // not contribute, so no skill carries a context boost.
         let q = [1.0, 0.0];
         let ctx = [0.0, 1.0];
-        let hits = rank_all_ctx(&q, Some(&ctx), &no_files(), "", &idx2(), &ctx_cfg());
+        let hits = rank_all_ctx(
+            &q,
+            Some(&ctx),
+            &no_files(),
+            &no_files(),
+            "",
+            &idx2(),
+            &ctx_cfg(),
+        );
         assert!(hits.iter().all(|h| h.context == 0.0));
         assert_eq!(hits[0].id, "a");
     }
@@ -315,7 +360,7 @@ mod tests {
         };
         let q = [1.0, 0.0]; // confident about `a`
         let files: BTreeSet<String> = ["b".to_string()].into_iter().collect();
-        let hits = rank_all_ctx(&q, None, &files, "", &idx2(), &cfg);
+        let hits = rank_all_ctx(&q, None, &files, &no_files(), "", &idx2(), &cfg);
         let b = hits.iter().find(|h| h.id == "b").unwrap();
         assert!((b.file - 0.2).abs() < 1e-6); // b carries the file boost
         let a = hits.iter().find(|h| h.id == "a").unwrap();
@@ -327,8 +372,47 @@ mod tests {
         let q = [1.0, 0.0];
         let files: BTreeSet<String> = ["b".to_string()].into_iter().collect();
         // file_boost defaults to 0.0 in ctx_cfg -> no file term anywhere.
-        let hits = rank_all_ctx(&q, None, &files, "", &idx2(), &ctx_cfg());
+        let hits = rank_all_ctx(&q, None, &files, &no_files(), "", &idx2(), &ctx_cfg());
         assert!(hits.iter().all(|h| h.file == 0.0));
+    }
+
+    #[test]
+    fn project_boost_gated_on_cosine_floor() {
+        // The ambient project signal lifts a plausible skill but is gated on the
+        // skill's own cosine clearing `min_similarity` (default 0.30): it reorders
+        // among plausible skills yet never rescues an irrelevant one.
+        let cfg = Config {
+            project_boost: 0.2,
+            ..ctx_cfg()
+        };
+        let proj: BTreeSet<String> = ["b".to_string()].into_iter().collect();
+
+        // Query aligned with `b`: cosine(q,b) = 1.0 >= 0.30 -> boost applies.
+        let hits = rank_all_ctx(&[0.0, 1.0], None, &no_files(), &proj, "", &idx2(), &cfg);
+        let b = hits.iter().find(|h| h.id == "b").unwrap();
+        assert!((b.project - 0.2).abs() < 1e-6);
+
+        // Query aligned with `a`: cosine(q,b) = 0.0 < 0.30 -> gated out despite `b`
+        // being in the project set.
+        let hits = rank_all_ctx(&[1.0, 0.0], None, &no_files(), &proj, "", &idx2(), &cfg);
+        let b = hits.iter().find(|h| h.id == "b").unwrap();
+        assert_eq!(b.project, 0.0);
+    }
+
+    #[test]
+    fn project_boost_off_when_zero() {
+        // project_boost defaults to 0.0 in ctx_cfg -> no project term anywhere.
+        let proj: BTreeSet<String> = ["b".to_string()].into_iter().collect();
+        let hits = rank_all_ctx(
+            &[0.0, 1.0],
+            None,
+            &no_files(),
+            &proj,
+            "",
+            &idx2(),
+            &ctx_cfg(),
+        );
+        assert!(hits.iter().all(|h| h.project == 0.0));
     }
 
     #[test]

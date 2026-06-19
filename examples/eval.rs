@@ -31,13 +31,16 @@ struct Case {
     /// Optional prior-turn context (oldest-first), from a 4th `|`-separated TSV
     /// column. Empty for the single-prompt corpora.
     context: Vec<String>,
+    /// Optional working directory, from a 5th TSV column, exercising the ambient
+    /// project-type channel (`SKI_PROJECT_BOOST`). Empty for the prompt-only corpora.
+    cwd: String,
 }
 
 fn parse_cases(raw: &str) -> Vec<Case> {
     raw.lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|l| {
-            let mut it = l.splitn(4, '\t');
+            let mut it = l.splitn(5, '\t');
             let want = it.next()?.trim().to_string();
             let kind = it.next()?.trim().to_string();
             let prompt = it.next()?.trim().to_string();
@@ -50,6 +53,7 @@ fn parse_cases(raw: &str) -> Vec<Case> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let cwd = it.next().map(|c| c.trim().to_string()).unwrap_or_default();
             if prompt.is_empty() {
                 return None;
             }
@@ -58,6 +62,7 @@ fn parse_cases(raw: &str) -> Vec<Case> {
                 kind,
                 prompt,
                 context,
+                cwd,
             })
         })
         .collect()
@@ -133,6 +138,9 @@ fn main() -> anyhow::Result<()> {
     if let Ok(v) = std::env::var("SKI_FILE_BOOST") {
         cfg.file_boost = v.parse().expect("SKI_FILE_BOOST must be a float");
     }
+    if let Ok(v) = std::env::var("SKI_PROJECT_BOOST") {
+        cfg.project_boost = v.parse().expect("SKI_PROJECT_BOOST must be a float");
+    }
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
@@ -169,7 +177,22 @@ fn main() -> anyhow::Result<()> {
         // files (a `.xlsx` etc.), mapping each to its skill.
         let file_text = format!("{} {}", c.context.join(" "), c.prompt);
         let file_ids = context::file_ids(&file_text);
-        let hits = rank::rank_all_ctx(&query, cvec.as_deref(), &file_ids, &c.prompt, &idx, &cfg);
+        // Ambient project-type channel: the case's cwd (5th column) maps to its
+        // ecosystem skill. Empty when the channel is off or no cwd is given.
+        let project_ids = if cfg.project_boost > 0.0 {
+            context::project_ids(&c.cwd)
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        let hits = rank::rank_all_ctx(
+            &query,
+            cvec.as_deref(),
+            &file_ids,
+            &project_ids,
+            &c.prompt,
+            &idx,
+            &cfg,
+        );
         // The reranker reads text: enrich its query with the recent window when the
         // prompt is vague (same gate that lets the context vector contribute).
         let prompt_top = hits.iter().map(|h| h.cosine).fold(0.0_f32, f32::max);
@@ -195,8 +218,8 @@ fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|h| {
                     format!(
-                        "{}=L{:.2}/cos{:.3}+ctx{:.2}+file{:.2}+kw{:.2}+ph{:.2}",
-                        h.id, h.score, h.cosine, h.context, h.file, h.keyword, h.phrase
+                        "{}=L{:.2}/cos{:.3}+ctx{:.2}+file{:.2}+proj{:.2}+kw{:.2}+ph{:.2}",
+                        h.id, h.score, h.cosine, h.context, h.file, h.project, h.keyword, h.phrase
                     )
                 })
                 .collect();

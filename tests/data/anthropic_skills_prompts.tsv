@@ -109,3 +109,16 @@ canvas-design	confusable	design a poster and also generate a matching color them
 (none)	negative	interactively rebase to squash the last three git commits
 (none)	negative	explain how the TCP three-way handshake works
 (none)	negative	rename the variable foo to bar in this rust function
+
+# --- near-miss negatives: ADJACENT to a document skill but non-actionable
+#     (trivia / definitional / tool-recommendation / UI-tip). These share
+#     vocabulary with pdf/xlsx/docx/pptx/claude-api/webapp-testing so they score
+#     in the muddy band, but the skills DO document tasks rather than answer
+#     questions, so a fired injection here is a true over-injection.
+(none)	negative	whats the best free pdf reader app for linux
+(none)	negative	keyboard shortcut to insert a row in excel on a mac
+(none)	negative	whats a good serif font for body text in a printed document
+(none)	negative	tips for staying calm while giving a big presentation
+(none)	negative	who founded anthropic and in what year
+(none)	negative	whats the difference between unit tests and integration tests
+mcp-builder	borderline	what does the acronym mcp stand for

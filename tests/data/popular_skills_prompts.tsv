@@ -134,3 +134,22 @@ python-performance-optimization	borderline	bootstrap a python project with uv an
 (none)	negative	configure ssh to use a jump host
 # hardware / embedded (a hard "debounce" negative that is NOT the JS one)
 (none)	negative	debounce a physical push button wired to an arduino
+
+# --- near-miss negatives: topically ADJACENT to a skill but non-actionable
+#     (trivia / definitional / tool-recommendation / UI-tip). Unlike the distant
+#     programming negatives above, these share vocabulary with a real skill, so
+#     they land in the muddy ~0.6 cosine band where precision actually bends.
+#     The skills are task-DOERS (build/edit/audit), not Q&A explainers, so a
+#     fired injection here is a genuine over-injection (a true FP).
+(none)	negative	what year was the rust programming language first released
+(none)	negative	who maintains the terraform open source project these days
+(none)	negative	whats the latest stable version of swift
+(none)	negative	what does the GIL stand for in python
+(none)	negative	whats the difference between a docker container and a virtual machine
+(none)	negative	whats the best free pdf reader app for linux
+(none)	negative	keyboard shortcut to insert a row in excel on a mac
+(none)	negative	whats a good serif font for body text in a printed document
+(none)	negative	tips for staying calm while giving a big presentation
+(none)	negative	whats the difference between sql and nosql databases
+(none)	negative	whats the difference between unit tests and integration tests
+(none)	negative	what does the rem unit mean in css

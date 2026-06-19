@@ -18,6 +18,7 @@
 use crate::config::Config;
 use crate::embed::{EmbedKind, Embedder};
 use std::collections::BTreeSet;
+use std::path::Path;
 
 /// Skill ids implied by a file extension, for the file-type context channel. Only
 /// extensions whose document *kind* is an unambiguous 1:1 with a skill are mapped —
@@ -65,6 +66,52 @@ pub fn file_ids(text: &str) -> BTreeSet<String> {
                 out.insert(id.to_string());
             }
         }
+    }
+    out
+}
+
+/// Known project-manifest filenames and the canonical skill each implies, for the
+/// project-type context channel. Mirrors [`ext_skill`]'s precision discipline: only
+/// ecosystems whose *general* identity is a single skill are mapped, and the target
+/// is that general best-practices skill — an ambient "this is a rust repo" signal
+/// points at idiomatic rust broadly, not a specialized sub-skill (async patterns)
+/// the cwd alone cannot justify. Ecosystems whose general skill is itself ambiguous
+/// are deliberately absent: python splits across testing/perf/pandas and the JS
+/// frameworks compete, so there is no 1:1 manifest→skill identity (the same reason
+/// generic code extensions are unmapped in `ext_skill`). Bare-filename manifests
+/// only — manifest-less ecosystems (terraform's loose `.tf` files) are left for a
+/// later readdir-based pass.
+const PROJECT_MANIFESTS: &[(&str, &str)] = &[
+    ("Cargo.toml", "rust-best-practices"),
+    ("go.mod", "golang-code-style"),
+];
+
+/// How many directory levels to walk upward from `cwd` looking for a manifest. A
+/// session's cwd is often a subdirectory of the project root where the manifest
+/// lives, so we ascend a few levels — but cap it so a deeply-nested cwd cannot
+/// stat its way to the filesystem root.
+const PROJECT_WALK_LEVELS: usize = 6;
+
+/// Skill ids implied by the project manifest(s) found in `cwd` or any ancestor
+/// directory (up to [`PROJECT_WALK_LEVELS`]). This is the *ambient* project-type
+/// signal — unlike a named file it is present every turn, so [`crate::rank`] gates
+/// its boost on the skill's own cosine and the channel defaults off. Performs cheap
+/// `exists()` stats only; de-duplicated; empty when `cwd` is empty or no known
+/// manifest is found.
+pub fn project_ids(cwd: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if cwd.is_empty() {
+        return out;
+    }
+    let mut dir = Some(Path::new(cwd));
+    for _ in 0..PROJECT_WALK_LEVELS {
+        let Some(d) = dir else { break };
+        for (manifest, id) in PROJECT_MANIFESTS {
+            if d.join(manifest).exists() {
+                out.insert((*id).to_string());
+            }
+        }
+        dir = d.parent();
     }
     out
 }
@@ -275,6 +322,39 @@ mod tests {
         // No 1:1 skill identity -> deliberately unmapped (see `ext_skill` docs).
         assert!(file_ids("see chart.png and demo.gif").is_empty());
         assert!(file_ids("open analysis.ipynb").is_empty());
+    }
+
+    #[test]
+    fn project_ids_maps_manifest_in_cwd_and_ancestors() {
+        // Hermetic temp tree: <root>/Cargo.toml and a nested cwd two levels down.
+        let root = std::env::temp_dir().join(format!(
+            "ski-proj-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = root.join("crates").join("inner");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[package]\n").unwrap();
+
+        // Manifest in cwd itself.
+        assert!(project_ids(root.to_str().unwrap()).contains("rust-best-practices"));
+        // Manifest found by walking up from a nested cwd.
+        assert!(project_ids(nested.to_str().unwrap()).contains("rust-best-practices"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn project_ids_empty_when_no_manifest_or_blank_cwd() {
+        assert!(project_ids("").is_empty());
+        // A real directory with no known manifest (the temp dir root) maps nothing.
+        let bare = std::env::temp_dir();
+        assert!(!project_ids(bare.to_str().unwrap()).contains("go-code-style"));
+        // A nonexistent path stats cleanly to empty.
+        assert!(project_ids("/no/such/ski/path/here").is_empty());
     }
 
     #[test]

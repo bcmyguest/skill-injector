@@ -27,6 +27,20 @@ Two uses:
 `skill-id = (none)`), or `borderline` (observe-only; excluded from headline
 metrics).
 
+Two optional trailing tab columns exercise the context channels: a 4th
+`|`-separated column carries prior-turn context (oldest-first, for the dense and
+file channels), and a 5th column carries a working directory for the ambient
+project-type channel (`SKI_PROJECT_BOOST` + a manifest like `Cargo.toml` in that
+dir). Both are empty in the single-prompt corpora.
+
+The `negative` rows come in two flavours: domain-*distant* prompts (C/C++/JVM/
+algorithms/dev-env that share no vocabulary with any skill) and **near-miss**
+prompts — trivia/definitional/tool-recommendation/UI-tip questions that *are*
+topically adjacent to a skill ("difference between a container and a VM", "best
+PDF reader app"). The near-miss rows land in the muddy ~0.6 cosine band the
+distant ones skip, so they stress precision where it actually bends; a fired
+injection on one is a real over-injection.
+
 ## Precision corpus + in-process eval (`popular_skills_prompts.tsv`)
 
 The narrow 17-skill anthropic library is *misleading* for over-injection: indirect
@@ -59,6 +73,12 @@ isolate the phrase channel's effect — e.g. on `phrase_trigger_prompts.tsv`:
 SKI_PHRASE_BOOST=0.0  cargo run --example eval -- tests/data/phrase_trigger_prompts.tsv
 SKI_PHRASE_BOOST=0.20 cargo run --example eval -- tests/data/phrase_trigger_prompts.tsv
 ```
+
+`SKI_FILE_BOOST=<f>` and `SKI_PROJECT_BOOST=<f>` likewise toggle the file-type and
+ambient project-type channels for one run (both default off in eval). The project
+channel reads a case's 5th-column cwd and is gated on the skill's own cosine
+clearing `min_similarity`, so it only reorders already-plausible skills — on this
+single-ecosystem-per-skill corpus it is near-inert by design.
 
 ## Run
 

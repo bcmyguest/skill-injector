@@ -94,6 +94,18 @@ pub struct Config {
     /// [`crate::context::file_ids`]). High-precision and *not* vagueness-gated — a
     /// named file is unambiguous. 0.0 disables the channel.
     pub file_boost: f32,
+    /// Score added to a skill whose ecosystem matches the working directory's
+    /// project manifest (a `Cargo.toml` boosts the canonical rust skill, a
+    /// `go.mod` the go skill, etc.; see [`crate::context::project_ids`]). Unlike a
+    /// named file, this is an *ambient* signal present on every turn, so it is the
+    /// weakest channel and is **gated on the skill's own cosine clearing
+    /// `min_similarity`** in [`crate::rank::rank_all_ctx`] — it can only break ties
+    /// among already-plausible skills, never rescue an irrelevant one below the
+    /// floor. **Off by default** (0.0) pending live-data tuning; set low (≤ ~0.1)
+    /// when enabling. A project type that maps to several skills (python, the JS
+    /// frameworks) is deliberately left unmapped, so this is near-inert on a
+    /// single-ecosystem-per-skill corpus.
+    pub project_boost: f32,
 
     // --- Stage-2 reranking (see `crate::rerank`). The thresholds below are on the
     // cross-encoder's logit scale, unrelated to the cosine thresholds above, and
@@ -179,6 +191,8 @@ impl Config {
             vague_lo: 0.55,
             vague_hi: 0.65,
             file_boost: 0.3,
+            // Ambient project signal off until tuned on live data (see field docs).
+            project_boost: 0.0,
             // Reranker gate + thresholds, calibrated against the JINA turbo
             // reranker (see `examples/rerank_probe`). Stage-1 top-1 accuracy: 76%
             // stage-1 only -> 88% with reranking.
@@ -254,6 +268,7 @@ pub struct FileConfig {
     pub vague_lo: Option<f32>,
     pub vague_hi: Option<f32>,
     pub file_boost: Option<f32>,
+    pub project_boost: Option<f32>,
     pub recall_floor: Option<f32>,
     pub high_conf: Option<f32>,
     pub clear_gap: Option<f32>,
@@ -330,6 +345,9 @@ impl FileConfig {
         }
         if let Some(v) = self.file_boost {
             cfg.file_boost = v;
+        }
+        if let Some(v) = self.project_boost {
+            cfg.project_boost = v;
         }
         if let Some(v) = self.recall_floor {
             cfg.recall_floor = v;
