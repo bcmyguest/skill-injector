@@ -499,6 +499,40 @@ mod tests {
     }
 
     #[test]
+    fn control_prompts_detected() {
+        assert!(is_control_prompt(
+            "<task-notification>\n<task-id>x</task-id>\n</task-notification>"
+        ));
+        assert!(is_control_prompt(
+            "  <system-reminder>foo</system-reminder>"
+        ));
+        // Genuine prompts that only mention a tag in prose still inject.
+        assert!(!is_control_prompt(
+            "explain the <task-notification> payload"
+        ));
+        assert!(!is_control_prompt("set up a python project"));
+    }
+
+    #[test]
+    fn slash_command_id_extracts_name() {
+        assert_eq!(slash_command_id("/pickup"), Some("pickup".into()));
+        assert_eq!(
+            slash_command_id("/pickup keep going"),
+            Some("pickup".into())
+        );
+        assert_eq!(slash_command_id("  /handoff now"), Some("handoff".into()));
+        // Namespaced command -> trailing skill segment.
+        assert_eq!(
+            slash_command_id("/caveman:caveman-commit"),
+            Some("caveman-commit".into())
+        );
+        // Not slash commands.
+        assert_eq!(slash_command_id("commit and push"), None);
+        assert_eq!(slash_command_id("/etc/hosts is a path"), None);
+        assert_eq!(slash_command_id("/"), None);
+    }
+
+    #[test]
     fn render_claude_empty_is_silent() {
         assert_eq!(render_claude(&Decision::default()), "");
     }
