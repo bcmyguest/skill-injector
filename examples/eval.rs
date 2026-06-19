@@ -22,26 +22,43 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::Host;
 use ski::rank::Hit;
-use ski::{index, rank, rerank, skill};
+use ski::{context, index, rank, rerank, skill};
 
 struct Case {
     want: String, // "(none)" for a negative
     kind: String,
     prompt: String,
+    /// Optional prior-turn context (oldest-first), from a 4th `|`-separated TSV
+    /// column. Empty for the single-prompt corpora.
+    context: Vec<String>,
 }
 
 fn parse_cases(raw: &str) -> Vec<Case> {
     raw.lines()
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|l| {
-            let mut it = l.splitn(3, '\t');
+            let mut it = l.splitn(4, '\t');
             let want = it.next()?.trim().to_string();
             let kind = it.next()?.trim().to_string();
             let prompt = it.next()?.trim().to_string();
+            let context = it
+                .next()
+                .map(|c| {
+                    c.split('|')
+                        .map(|p| p.trim().to_string())
+                        .filter(|p| !p.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
             if prompt.is_empty() {
                 return None;
             }
-            Some(Case { want, kind, prompt })
+            Some(Case {
+                want,
+                kind,
+                prompt,
+                context,
+            })
         })
         .collect()
 }
@@ -51,11 +68,11 @@ fn parse_cases(raw: &str) -> Vec<Case> {
 fn decide(
     hits: &[Hit],
     idx: &index::Index,
-    prompt: &str,
+    rerank_query: &str,
     cfg: &Config,
 ) -> (&'static str, Vec<Hit>) {
     let reranked = rerank::is_ambiguous(hits, cfg)
-        .then(|| rerank::rerank(hits, idx, prompt, cfg))
+        .then(|| rerank::rerank(hits, idx, rerank_query, cfg))
         .flatten();
     match reranked {
         Some(r) => {
@@ -98,6 +115,24 @@ fn main() -> anyhow::Result<()> {
     if let Ok(v) = std::env::var("SKI_PHRASE_BOOST") {
         cfg.phrase_boost = v.parse().expect("SKI_PHRASE_BOOST must be a float");
     }
+    // Context enrichment (Goal 3) is off by default; these env knobs activate and
+    // tune it for one run, mirroring SKI_PHRASE_BOOST, so the same corpus can be
+    // scored with and without conversational context.
+    if let Ok(v) = std::env::var("SKI_CONTEXT_DEPTH") {
+        cfg.context_depth = v.parse().expect("SKI_CONTEXT_DEPTH must be a usize");
+    }
+    if let Ok(v) = std::env::var("SKI_CONTEXT_WEIGHT") {
+        cfg.context_weight = v.parse().expect("SKI_CONTEXT_WEIGHT must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_VAGUE_LO") {
+        cfg.vague_lo = v.parse().expect("SKI_VAGUE_LO must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_VAGUE_HI") {
+        cfg.vague_hi = v.parse().expect("SKI_VAGUE_HI must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_FILE_BOOST") {
+        cfg.file_boost = v.parse().expect("SKI_FILE_BOOST must be a float");
+    }
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
@@ -129,8 +164,23 @@ fn main() -> anyhow::Result<()> {
         let query = embedder
             .embed(std::slice::from_ref(&c.prompt), EmbedKind::Query)?
             .remove(0);
-        let hits = rank::rank_all(&query, &c.prompt, &idx, &cfg);
-        let (stage, injected) = decide(&hits, &idx, &c.prompt, &cfg);
+        let cvec = context::vector(embedder.as_ref(), &c.context, &cfg)?;
+        // File-type channel: scan this turn's prompt AND its prior context for named
+        // files (a `.xlsx` etc.), mapping each to its skill.
+        let file_text = format!("{} {}", c.context.join(" "), c.prompt);
+        let file_ids = context::file_ids(&file_text);
+        let hits = rank::rank_all_ctx(&query, cvec.as_deref(), &file_ids, &c.prompt, &idx, &cfg);
+        // The reranker reads text: enrich its query with the recent window when the
+        // prompt is vague (same gate that lets the context vector contribute).
+        let prompt_top = hits.iter().map(|h| h.cosine).fold(0.0_f32, f32::max);
+        let rerank_query = context::rerank_query(
+            &c.prompt,
+            prompt_top,
+            &c.context,
+            !file_ids.is_empty(),
+            &cfg,
+        );
+        let (stage, injected) = decide(&hits, &idx, &rerank_query, &cfg);
         let ids: Vec<String> = injected.iter().map(|h| h.id.clone()).collect();
         let is_neg = c.want == "(none)";
         let observe_only = c.kind == "borderline";
@@ -145,8 +195,8 @@ fn main() -> anyhow::Result<()> {
                 .iter()
                 .map(|h| {
                     format!(
-                        "{}=L{:.2}/cos{:.3}+kw{:.2}+ph{:.2}",
-                        h.id, h.score, h.cosine, h.keyword, h.phrase
+                        "{}=L{:.2}/cos{:.3}+ctx{:.2}+file{:.2}+kw{:.2}+ph{:.2}",
+                        h.id, h.score, h.cosine, h.context, h.file, h.keyword, h.phrase
                     )
                 })
                 .collect();

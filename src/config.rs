@@ -64,6 +64,37 @@ pub struct Config {
     /// Skill ids injected whenever a keyword hits, even below `min_similarity`.
     pub force: Vec<String>,
 
+    // --- Query-side context enrichment (see `crate::rank::rank_all_ctx`). A vague
+    // follow-up prompt is disambiguated by signals from the turns before it. Two
+    // channels share the recent-prompt window (`context_depth`):
+    //   * the file-type channel (`file_boost`) — a document file named in the prompt
+    //     or a recent turn (`.xlsx`, `.pdf`, ...) boosts its skill. High-precision
+    //     and **on by default**: it adds no false-inject on any eval corpus and
+    //     doubles recall on multi-turn document follow-ups.
+    //   * the dense blend (`context_weight`) — a recency-weighted context vector
+    //     mixed into stage-1. **Off by default**: it lifts multi-turn recall but
+    //     admits a topic-switch false-inject no scalar floor separates from genuine
+    //     vague follow-ups. Set `context_weight > 0` to opt in. ---
+    /// How many recent prompts to retain as conversational context (0 = disabled).
+    pub context_depth: usize,
+    /// Max weight the context channel can add to a skill's score. The *effective*
+    /// weight scales from this (a fully vague prompt) down to 0 (a confident,
+    /// specific prompt) — see [`crate::rank::context_weight`]. Cosine-space, tuned
+    /// per embedder; 0.0 disables the blend.
+    pub context_weight: f32,
+    /// Prompt best-self-cosine at/below which a prompt counts as *fully* vague
+    /// (context applied at full `context_weight`).
+    pub vague_lo: f32,
+    /// Prompt best-self-cosine at/above which a prompt counts as confident
+    /// (context suppressed entirely). Between `vague_lo` and this, context scales
+    /// linearly.
+    pub vague_hi: f32,
+    /// Score added to a skill when a file of its type is referenced in the prompt
+    /// or recent context (e.g. a `.xlsx` boosts `xlsx`; see
+    /// [`crate::context::file_ids`]). High-precision and *not* vagueness-gated — a
+    /// named file is unambiguous. 0.0 disables the channel.
+    pub file_boost: f32,
+
     // --- Stage-2 reranking (see `crate::rerank`). The thresholds below are on the
     // cross-encoder's logit scale, unrelated to the cosine thresholds above, and
     // are *not* touched by `calibrate_to`. ---
@@ -136,6 +167,18 @@ impl Config {
             directive_strength: Strength::Auto,
             deny: Vec::new(),
             force: Vec::new(),
+            // The file-type channel is on by default (high-precision, zero added
+            // false-inject across every eval corpus). The dense blend stays off
+            // (`context_weight 0.0`): it lifts multi-turn recall but admits a
+            // topic-switch false-inject no scalar floor separates. `context_depth`
+            // keeps the rolling prompt window the file channel needs to see a file
+            // attached a turn or two back; `vague_lo`/`hi` are bge-cosine-space
+            // gates, live only for the dense blend once it is opted into.
+            context_depth: 3,
+            context_weight: 0.0,
+            vague_lo: 0.55,
+            vague_hi: 0.65,
+            file_boost: 0.3,
             // Reranker gate + thresholds, calibrated against the JINA turbo
             // reranker (see `examples/rerank_probe`). Stage-1 top-1 accuracy: 76%
             // stage-1 only -> 88% with reranking.
@@ -206,6 +249,11 @@ pub struct FileConfig {
     pub directive_strength: Option<String>,
     pub deny: Option<Vec<String>>,
     pub force: Option<Vec<String>>,
+    pub context_depth: Option<usize>,
+    pub context_weight: Option<f32>,
+    pub vague_lo: Option<f32>,
+    pub vague_hi: Option<f32>,
+    pub file_boost: Option<f32>,
     pub recall_floor: Option<f32>,
     pub high_conf: Option<f32>,
     pub clear_gap: Option<f32>,
@@ -267,6 +315,21 @@ impl FileConfig {
         }
         if let Some(v) = &self.force {
             cfg.force = v.clone();
+        }
+        if let Some(v) = self.context_depth {
+            cfg.context_depth = v;
+        }
+        if let Some(v) = self.context_weight {
+            cfg.context_weight = v;
+        }
+        if let Some(v) = self.vague_lo {
+            cfg.vague_lo = v;
+        }
+        if let Some(v) = self.vague_hi {
+            cfg.vague_hi = v;
+        }
+        if let Some(v) = self.file_boost {
+            cfg.file_boost = v;
         }
         if let Some(v) = self.recall_floor {
             cfg.recall_floor = v;

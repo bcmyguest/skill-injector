@@ -101,13 +101,15 @@ pub fn rerank(hits: &[Hit], idx: &Index, prompt: &str, cfg: &Config) -> Option<V
 /// it already is). The caller still applies deny/session/cap.
 ///
 /// **Stage-1 agreement.** Before the reranker thresholds, a candidate must have a
-/// bi-encoder score (the preserved stage-1 `cosine + keyword + phrase`; [`rerank`]
-/// only overwrites `score` with the logit) within [`AGREEMENT_SLACK`] of stage-1's
-/// own injection floor (`min_similarity`). The phrase term is included on purpose:
-/// a confident multi-token trigger match is exactly the "stage-1 judged relevant"
-/// signal this gate looks for, so it may carry an otherwise sub-floor cosine through. The cross-encoder's job is to reorder and
-/// confirm the *retrieved* relevant set, not to resurrect a skill stage-1 judged
-/// irrelevant. Without this gate a prompt with no real match — "implement the
+/// bi-encoder score (the preserved stage-1 `cosine + context + file + keyword +
+/// phrase`; [`rerank`] only overwrites `score` with the logit) within [`AGREEMENT_SLACK`] of
+/// stage-1's own injection floor (`min_similarity`). The phrase term is included on
+/// purpose: a confident multi-token trigger match is exactly the "stage-1 judged
+/// relevant" signal this gate looks for, so it may carry an otherwise sub-floor
+/// cosine through. The context term rides along for the same reason — a vague prompt
+/// the conversation made relevant is a stage-1 "relevant" signal too. The
+/// cross-encoder's job is to reorder and confirm the *retrieved* relevant set, not
+/// to resurrect a skill stage-1 judged irrelevant. Without this gate a prompt with no real match — "implement the
 /// builder pattern in Java", "RSA key generation from scratch" — lets the reranker
 /// pull a sub-floor skill to the top and inject noise; the logits there interleave
 /// with genuine weak matches (so no `rerank_min` value separates them), but their
@@ -118,7 +120,7 @@ pub fn passes(reranked: &[Hit], cfg: &Config) -> Vec<Hit> {
     // then anchors the relative margin (a sub-floor leader can't drag peers in).
     let eligible: Vec<&Hit> = reranked
         .iter()
-        .filter(|h| h.cosine + h.keyword + h.phrase >= floor)
+        .filter(|h| h.cosine + h.context + h.file + h.keyword + h.phrase >= floor)
         .collect();
     let best = eligible
         .first()
@@ -222,6 +224,8 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             cosine: score,
+            context: 0.0,
+            file: 0.0,
             keyword: 0.0,
             phrase: 0.0,
             score,
@@ -235,6 +239,8 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             cosine,
+            context: 0.0,
+            file: 0.0,
             keyword: 0.0,
             phrase: 0.0,
             score: logit,
