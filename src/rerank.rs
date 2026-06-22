@@ -60,6 +60,19 @@ pub fn is_ambiguous(hits: &[Hit], cfg: &Config) -> bool {
     if top.score < cfg.recall_floor {
         return false; // nothing relevant; stage-1 floor rejects it anyway.
     }
+    // A confident file-channel leader is trusted without the cross-encoder. A named
+    // file (`.xlsx`/`.pdf`/`.docx`/...) is a high-precision, directly-attributable
+    // signal — unlike the keyword boost this gate deliberately excludes below — so
+    // when it lifts its skill to a clear stage-1 lead, the reranker (which reads only
+    // text) must not veto it on a vague follow-up like "pull the text out of it",
+    // where the prompt itself carries almost no signal. Gated on a clear score gap so
+    // a file merely mentioned in passing, with no dominant match, still reranks.
+    if top.file > 0.0 {
+        let s2 = hits.get(1).map(|h| h.score).unwrap_or(0.0);
+        if top.score - s2 >= cfg.clear_gap {
+            return false; // confident file-channel winner.
+        }
+    }
     // Confidence is measured on *cosine*, not the keyword-inflated `score`: a
     // keyword boost (e.g. "commit" matching pre-commit-setup) can fake a high
     // score and a clear gap, but that is precisely the noisy signal the
@@ -276,6 +289,37 @@ mod tests {
     #[test]
     fn empty_is_not_ambiguous() {
         assert!(!is_ambiguous(&[], &cfg()));
+    }
+
+    /// A confident file-channel leader skips the reranker even though its raw cosine
+    /// sits in the muddy band: the file boost is high-precision, so a clear lead is
+    /// trusted. Mirrors the doc follow-ups ("pull the text out of it" -> pdf) the
+    /// reranker was wrongly vetoing.
+    #[test]
+    fn confident_file_leader_is_not_ambiguous() {
+        let lead = Hit {
+            file: 0.30,
+            score: 0.866, // cosine 0.566 + file 0.30
+            ..hit("pdf", 0.566)
+        };
+        let runner = hit("pptx", 0.55);
+        assert!(!is_ambiguous(&[lead, runner], &cfg()));
+    }
+
+    /// A file mentioned in passing with no dominant match (small score gap) still
+    /// reranks — the boost alone must not wave a contested field through.
+    #[test]
+    fn weak_file_leader_still_reranks() {
+        let lead = Hit {
+            file: 0.30,
+            score: 0.62, // cosine 0.32 + file 0.30
+            ..hit("pdf", 0.32)
+        };
+        let runner = Hit {
+            score: 0.58,
+            ..hit("docx", 0.58)
+        };
+        assert!(is_ambiguous(&[lead, runner], &cfg())); // gap 0.04 < clear_gap 0.12
     }
 
     #[test]
