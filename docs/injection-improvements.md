@@ -62,29 +62,41 @@ one with the `Skill` tool ... Read the listed path directly only if ...:
 ```
 
 **After** — a one-line header, and per skill a distinctive `SkillRecommendation`
-token carrying the confidence, the description, and a verb scaled by band. The
-`(source: path)` fallback is dropped (both hosts have a `Skill` mechanism):
+token, the description, and a verb scaled by band. The `(source: path)` fallback
+is dropped (both hosts have a `Skill` mechanism); the raw confidence decimal is
+**not** shown either (see the credibility note below):
 
 ```
-Skill matches for this request (confidence 0–1 from a local matcher). Invoke
-fitting ones via the `Skill` tool by name — do not Read the files:
+ski matched these skills to your request — a dedicated retrieval+rerank pass,
+separate from and complementary to the host's own skill selection. Invoke
+fitting ones by name via the `Skill` tool; do not Read the files:
 
-- SkillRecommendation(`git-attribution`, 0.91): How to attribute AI assistance in git commits. — invoke it.
-- SkillRecommendation(`pdf`, 0.72): Work with PDF files. — use if it fits.
-- SkillRecommendation(`xlsx`, 0.56): Spreadsheet tasks. — possibly relevant.
+- SkillRecommendation(`git-attribution`): How to attribute AI assistance in git commits. — invoke it.
+- SkillRecommendation(`pdf`): Work with PDF files. — invoke it if it fits.
+- SkillRecommendation(`xlsx`): Spreadsheet tasks. — consider invoking it.
 ```
 
 Verb by `(strength, band)`:
 
-| band   | soft (Claude)        | hard (opencode)                         |
-|--------|----------------------|-----------------------------------------|
-| High   | `— invoke it.`       | `— you MUST invoke it before responding.`|
-| Medium | `— use if it fits.`  | `— invoke it before responding if it fits.`|
-| Low    | `— possibly relevant.`| `— invoke it before responding if it fits.`|
+| band   | soft (Claude)            | hard (opencode)                         |
+|--------|--------------------------|-----------------------------------------|
+| High   | `— invoke it.`           | `— you MUST invoke it before responding.`|
+| Medium | `— invoke it if it fits.`| `— invoke it before responding if it fits.`|
+| Low    | `— consider invoking it.`| `— invoke it before responding if it fits.`|
 
 `build` takes `&[Rec]` (`id` + `confidence`) instead of `&[Hit]`; the header/line
 templates read the band. The distinctive `SkillRecommendation(` token also makes
 telemetry/grep able to spot a recommendation echoed back in a transcript.
+
+**Credibility note (2026-06-22).** The phrasing was retuned for trust once the
+reranker floor (`rerank_min`, see the config) was tightened to abstain on
+low-confidence noise. Because every injected line now clears a precision gate,
+the language stops hedging: the old `— possibly relevant.` (which undersold
+matches the model *did* act on) became `— consider invoking it.`, the header
+reframes ski as a dedicated pass that complements the host's built-in chooser
+(which misses skills), and the raw decimal — which only invited the model to
+anchor on a mid value and discount a real match — is dropped from the
+model-facing line while still being recorded in telemetry.
 
 ---
 
