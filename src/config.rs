@@ -125,6 +125,16 @@ pub struct Config {
     /// Max reranker-logit gap below the best reranked skill for a peer to ride along.
     pub rerank_margin: f32,
 
+    /// Confidence (`[0,1]`) at/above which a *lone* near-certain match is escalated
+    /// from a directive pointer to a full body inject — the `SKILL.md` is inlined
+    /// directly so the model can't skip the Skill-tool round-trip. Only fires in
+    /// `inject_mode = directive` and only when exactly one skill is selected (two
+    /// co-relevant peers mean we are *less* certain, so they stay directives). Set
+    /// deliberately high: in practice this is reached only by a cross-encoder-
+    /// confirmed match (the cosine→confidence map caps below it for bge), so a
+    /// fluky stage-1 hit never triggers a body dump. Raise above `1.0` to disable.
+    pub body_inject_min: f32,
+
     /// Append opt-in JSONL telemetry events (see [`crate::telemetry`]). Off by
     /// default. Enabled by this field *or* a truthy `SKI_TELEMETRY` env var —
     /// either one turns it on, so the env var still works without a config file.
@@ -245,6 +255,11 @@ impl Config {
             rerank_top_k: 12,
             rerank_min: -1.1,
             rerank_margin: 2.0,
+            // Body-escalate only a lone, cross-encoder-confirmed near-certain match
+            // (sigmoid(2.45) ~= 0.92). High enough that a stage-1 cosine hit — whose
+            // confidence maps to <= ~0.85 for bge — never triggers it, so only the
+            // reranker's strongest verdicts inline the full SKILL.md.
+            body_inject_min: 0.92,
             telemetry: false,
         }
     }
@@ -290,6 +305,7 @@ pub struct FileConfig {
     pub rerank_top_k: Option<usize>,
     pub rerank_min: Option<f32>,
     pub rerank_margin: Option<f32>,
+    pub body_inject_min: Option<f32>,
     pub telemetry: Option<bool>,
 }
 
@@ -381,6 +397,9 @@ impl FileConfig {
         }
         if let Some(v) = self.rerank_margin {
             cfg.rerank_margin = v;
+        }
+        if let Some(v) = self.body_inject_min {
+            cfg.body_inject_min = v;
         }
         if let Some(v) = self.telemetry {
             cfg.telemetry = v;

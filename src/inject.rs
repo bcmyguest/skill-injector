@@ -82,7 +82,7 @@ fn directive_block(entry: &Entry, strength: Strength, confidence: f32) -> String
     let verb = match (strength, confidence::band(confidence)) {
         (Strength::Hard, Band::High) => "you MUST invoke it before responding.",
         (Strength::Hard, _) => "invoke it before responding if it fits.",
-        (_, Band::High) => "invoke it.",
+        (_, Band::High) => "invoke it now, before you respond.",
         (_, Band::Medium) => "invoke it if it fits.",
         (_, Band::Low) => "consider invoking it.",
     };
@@ -192,7 +192,7 @@ mod tests {
             )
             .0
         };
-        assert!(soft(0.95).contains("— invoke it."));
+        assert!(soft(0.95).contains("invoke it now, before you respond."));
         assert!(soft(0.70).contains("invoke it if it fits."));
         assert!(soft(0.40).contains("consider invoking it."));
     }

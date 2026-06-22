@@ -78,11 +78,20 @@ fitting ones by name via the `Skill` tool; do not Read the files:
 
 Verb by `(strength, band)`:
 
-| band   | soft (Claude)            | hard (opencode)                         |
-|--------|--------------------------|-----------------------------------------|
-| High   | `— invoke it.`           | `— you MUST invoke it before responding.`|
-| Medium | `— invoke it if it fits.`| `— invoke it before responding if it fits.`|
-| Low    | `— consider invoking it.`| `— invoke it before responding if it fits.`|
+| band   | soft (Claude)                       | hard (opencode)                         |
+|--------|-------------------------------------|-----------------------------------------|
+| High   | `— invoke it now, before you respond.`| `— you MUST invoke it before responding.`|
+| Medium | `— invoke it if it fits.`           | `— invoke it before responding if it fits.`|
+| Low    | `— consider invoking it.`           | `— invoke it before responding if it fits.`|
+
+**Body escalation (2026-06-22).** A *lone* near-certain match
+(`confidence >= cfg.body_inject_min`, default 0.92 — reached only by a
+cross-encoder-confirmed verdict) is escalated from a directive pointer to a full
+`SKILL.md` body inject, so the surest hits are *applied*, not merely pointed at
+(no Skill-tool round-trip the model can skip). Gated to one rec — two co-relevant
+peers signal lower certainty and a double body dump is too heavy — and to
+`inject_mode = directive` (explicit `body` mode already inlines everything). See
+`hook::inject_mode`.
 
 `build` takes `&[Rec]` (`id` + `confidence`) instead of `&[Hit]`; the header/line
 templates read the band. The distinctive `SkillRecommendation(` token also makes

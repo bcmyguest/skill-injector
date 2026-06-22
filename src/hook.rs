@@ -10,7 +10,7 @@
 //! - opencode: `{skills:[...], inject:"..."}` always (the TS adapter parses it).
 
 use crate::confidence::{self, Stage};
-use crate::config::{Config, Strength};
+use crate::config::{Config, InjectMode, Strength};
 use crate::embed::{self, EmbedKind};
 use crate::index::{self, Index};
 use crate::inject::Rec;
@@ -177,7 +177,11 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     }
 
     let strength = resolve_strength(cfg.directive_strength, host);
-    let (text, ids) = inject::build(&selected, &idx, cfg.inject_mode, strength, cfg.char_budget);
+    // Escalate a lone, near-certain match from a directive pointer to a full body
+    // inject: inline the SKILL.md so the model can't skip the Skill-tool round-trip.
+    // Two co-relevant peers mean we are less certain, so they stay directives.
+    let mode = inject_mode(&selected, &cfg);
+    let (text, ids) = inject::build(&selected, &idx, mode, strength, cfg.char_budget);
     if text.is_empty() {
         return Ok(Decision::default());
     }
@@ -305,6 +309,23 @@ fn select_reranked(reranked: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<R
         .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
         .take(cfg.max_skills)
         .collect()
+}
+
+/// Pick the inject shape for the chosen `recs`. Normally `cfg.inject_mode`, but a
+/// lone match at/above `cfg.body_inject_min` confidence is escalated to
+/// [`InjectMode::Body`] — the full `SKILL.md` is inlined so a near-certain skill
+/// is applied, not merely pointed at. Requires `directive` mode (an explicit
+/// `body` config already inlines everything) and exactly one rec (co-relevant
+/// peers signal lower certainty and a heavier dump, so they stay directives).
+fn inject_mode(recs: &[Rec], cfg: &Config) -> InjectMode {
+    if cfg.inject_mode == InjectMode::Directive
+        && recs.len() == 1
+        && recs[0].confidence >= cfg.body_inject_min
+    {
+        InjectMode::Body
+    } else {
+        cfg.inject_mode
+    }
 }
 
 /// Resolve [`Strength::Auto`] from the host: Claude has a strong native chooser
@@ -496,6 +517,59 @@ mod tests {
             .map(|h| h.id)
             .collect();
         assert_eq!(got, ["x"]);
+    }
+
+    fn rec(id: &str, confidence: f32) -> Rec {
+        Rec {
+            id: id.to_string(),
+            confidence,
+        }
+    }
+
+    #[test]
+    fn lone_near_certain_match_escalates_to_body() {
+        let cfg = Config::default(); // directive mode, body_inject_min 0.92
+        assert_eq!(inject_mode(&[rec("a", 0.95)], &cfg), InjectMode::Body);
+    }
+
+    #[test]
+    fn body_escalation_needs_high_confidence() {
+        let cfg = Config::default();
+        // A High-band but not near-certain match stays a directive pointer.
+        assert_eq!(inject_mode(&[rec("a", 0.85)], &cfg), InjectMode::Directive);
+    }
+
+    #[test]
+    fn body_escalation_needs_a_lone_match() {
+        let cfg = Config::default();
+        // Two co-relevant near-certain peers stay directives (less certain; a
+        // double body dump is too heavy).
+        assert_eq!(
+            inject_mode(&[rec("a", 0.95), rec("b", 0.95)], &cfg),
+            InjectMode::Directive
+        );
+    }
+
+    #[test]
+    fn body_escalation_disabled_above_one() {
+        let cfg = Config {
+            body_inject_min: 1.1, // the documented "off" setting
+            ..Default::default()
+        };
+        assert_eq!(inject_mode(&[rec("a", 0.99)], &cfg), InjectMode::Directive);
+    }
+
+    #[test]
+    fn explicit_body_mode_is_unchanged() {
+        let cfg = Config {
+            inject_mode: InjectMode::Body,
+            ..Default::default()
+        };
+        // A weak, multi-skill selection still inlines when the user pinned body mode.
+        assert_eq!(
+            inject_mode(&[rec("a", 0.2), rec("b", 0.2)], &cfg),
+            InjectMode::Body
+        );
     }
 
     #[test]
