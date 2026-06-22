@@ -205,15 +205,30 @@ impl Config {
             // because the bi-encoder is confidently wrong on the confusable pairs
             // the reranker exists to fix. It is retained as a tunable, not removed.
             //
-            // `rerank_min` was re-tuned on a realistic ~48-skill index (17 anthropic
-            // + 31 highest-installed community skills from skills.sh; see
-            // `tests/data/popular_skills_prompts.tsv`). The old -2.5 was set on the
-            // artificially narrow 17-skill anthropic library, where indirect prompts
-            // had no good match and scored like noise. On a realistic index real
-            // matches score >= -1.03 and unrelated programming prompts cluster
-            // <= -1.6, so -1.5 cuts false injections ~80% (5 -> 1 on the corpus)
-            // with zero top-1 loss (19/19 positives kept). Larger embedders/rerankers
-            // (bge-base, jina-v2) tie this at higher cost, so the gate is the lever.
+            // `rerank_min` is tuned on the realistic ~120-skill index (17 anthropic
+            // + highest-installed community skills from skills.sh; see
+            // `tests/data/popular_skills_prompts.tsv`) — the artificially narrow
+            // 17-skill anthropic library is *not* the tuning authority (its indirect
+            // prompts have no good match and score like noise, which would pull the
+            // floor too low). The earlier -2.5/-1.5 floors admitted a band of
+            // negative-logit candidates — sigmoid(-1.5) ~= 0.18 confidence — that the
+            // cross-encoder is itself signalling are *not* matches. Live telemetry
+            // confirmed it: of the recommendations injected in the 0.18-0.24
+            // confidence band ("commit and push" -> caveman-commit, "continue" ->
+            // pickup, "/goal ..." -> skill-creator), essentially none were ever acted
+            // on. Injecting them is the dominant usage-rate drag and erodes the whole
+            // channel's credibility (the model learns to ignore *every*
+            // SkillRecommendation, including the strong ones), so the floor abstains
+            // on them. -1.1 (sigmoid ~= 0.25) is the precise recall-preserving
+            // precision maximum on the realistic corpus: a strict improvement over
+            // -1.5 there (recall held at 41/43 = 95%, false injects 3 -> 1 of 64);
+            // tightening past it (-1.0) starts dropping real positives. The cost is
+            // some recall on *indirect* prompts whose logit sits in -1.5..-1.1 — a
+            // zone where genuine weak matches and live noise overlap and no scalar
+            // separates them (cross-encoder pairs score independently of the index) —
+            // but those are largely cases the host's own skill chooser covers anyway.
+            // Larger embedders/rerankers (bge-base, jina-v2) tie this at higher cost,
+            // so the gate is the lever. Sweep via `SKI_RERANK_MIN` in `examples/eval`.
             //
             // `rerank_min` alone can't catch every false inject: on a richer corpus
             // a no-match prompt's reranked logit interleaves with genuine weak
@@ -228,7 +243,7 @@ impl Config {
             high_conf: 2.0,
             clear_gap: 0.12,
             rerank_top_k: 12,
-            rerank_min: -1.5,
+            rerank_min: -1.1,
             rerank_margin: 2.0,
             telemetry: false,
         }
