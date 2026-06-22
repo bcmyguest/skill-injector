@@ -141,6 +141,15 @@ fn main() -> anyhow::Result<()> {
     if let Ok(v) = std::env::var("SKI_PROJECT_BOOST") {
         cfg.project_boost = v.parse().expect("SKI_PROJECT_BOOST must be a float");
     }
+    // Reranker-gate sweep knobs: tune the stage-2 abstention floor/margin for one
+    // run without editing config.toml (these are on the logit scale, untouched by
+    // `calibrate_to`).
+    if let Ok(v) = std::env::var("SKI_RERANK_MIN") {
+        cfg.rerank_min = v.parse().expect("SKI_RERANK_MIN must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_RERANK_MARGIN") {
+        cfg.rerank_margin = v.parse().expect("SKI_RERANK_MARGIN must be a float");
+    }
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());

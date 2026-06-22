@@ -60,28 +60,35 @@ pub fn build(
 
     let header = match mode {
         InjectMode::Directive => {
-            "Skill matches for this request (confidence 0–1 from a local matcher). \
-             Invoke fitting ones via the `Skill` tool by name — do not Read the files:"
+            "ski matched these skills to your request — a dedicated retrieval+rerank pass, \
+             separate from and complementary to the host's own skill selection. Invoke \
+             fitting ones by name via the `Skill` tool; do not Read the files:"
         }
         InjectMode::Body => "Skill instructions relevant to this request are included below:",
     };
     (format!("{header}\n\n{}", blocks.join("\n\n")), ids)
 }
 
-/// One directive line: a distinctive `SkillRecommendation(name, conf)` token, the
+/// One directive line: a distinctive `SkillRecommendation(name)` token, the
 /// description, then a verb scaled by confidence band (and harder under
 /// [`Strength::Hard`] for weak local choosers).
+///
+/// The raw confidence is deliberately **not** shown to the model: every line
+/// here has already cleared a precision gate, so a bare decimal (`0.36`) only
+/// invites the model to anchor on it and discount a genuine match. The band —
+/// expressed in the verb's forcefulness — is the honest, right-grained signal;
+/// the exact value still rides into telemetry via [`Rec::confidence`].
 fn directive_block(entry: &Entry, strength: Strength, confidence: f32) -> String {
     let verb = match (strength, confidence::band(confidence)) {
         (Strength::Hard, Band::High) => "you MUST invoke it before responding.",
         (Strength::Hard, _) => "invoke it before responding if it fits.",
-        (_, Band::High) => "invoke it.",
-        (_, Band::Medium) => "use if it fits.",
-        (_, Band::Low) => "possibly relevant.",
+        (_, Band::High) => "invoke it now, before you respond.",
+        (_, Band::Medium) => "invoke it if it fits.",
+        (_, Band::Low) => "consider invoking it.",
     };
     format!(
-        "- SkillRecommendation(`{}`, {:.2}): {} — {}",
-        entry.name, confidence, entry.description, verb
+        "- SkillRecommendation(`{}`): {} — {}",
+        entry.name, entry.description, verb
     )
 }
 
@@ -164,8 +171,9 @@ mod tests {
             Strength::Hard,
             6000,
         );
-        // The distinctive token and confidence are shown; the source path is not.
-        assert!(soft.contains("SkillRecommendation(`alpha`, 0.91)"));
+        // The distinctive token is shown; the raw confidence and source path are not.
+        assert!(soft.contains("SkillRecommendation(`alpha`)"));
+        assert!(!soft.contains("0.91"));
         assert!(!soft.contains("/p/SKILL.md"));
         assert!(!soft.contains("MUST"));
         assert!(hard.contains("MUST")); // high-confidence hard directive
@@ -184,9 +192,9 @@ mod tests {
             )
             .0
         };
-        assert!(soft(0.95).contains("invoke it."));
-        assert!(soft(0.70).contains("use if it fits."));
-        assert!(soft(0.40).contains("possibly relevant."));
+        assert!(soft(0.95).contains("invoke it now, before you respond."));
+        assert!(soft(0.70).contains("invoke it if it fits."));
+        assert!(soft(0.40).contains("consider invoking it."));
     }
 
     #[test]
