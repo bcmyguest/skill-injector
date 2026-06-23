@@ -3,6 +3,20 @@
 Local, model-agnostic **automatic skill injection** for [Claude Code](https://docs.claude.com/en/docs/claude-code)
 and [opencode](https://opencode.ai).
 
+> **Status: archived (2026-06-23).** Controlled testing concluded that `ski` does **not
+> outperform the host's own native skill chooser**. The host model reads full skill
+> descriptions in-context and reasons over them — a stronger selector than a local
+> bi-encoder + small reranker. In a head-to-head on the indirect prompts `ski` was built
+> to rescue, the native chooser (a local 26B model — the case most favorable to `ski`)
+> won 4, `ski` won 1–2, with 5 ties; a stronger host widens the gap. The internal eval's
+> apparent recall gains measured `ski` against its *own* weaker pipeline, not the host.
+> The last retrieval lever tried — a BM25-over-description lexical channel — helped that
+> internal pipeline but, against the real chooser, only cleanly rescued an
+> under-triggered niche (e.g. "OCR this scanned pdf" → `pdf`) while regressing
+> knowledge-question prompts the host correctly ignored. The project is kept here as a
+> documented negative result: **local retrieval does not beat an in-context-reasoning
+> chooser at skill selection.** Not under active development.
+
 ## Why this exists
 
 Agent skill systems advertise every skill's description to the model and trust it to
