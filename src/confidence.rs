@@ -18,7 +18,18 @@ pub enum Stage {
     Cosine,
     /// Stage-2 cross-encoder reranker logit.
     Rerank,
+    /// Stage-1.5 lexical (BM25-over-description) dominant winner.
+    Lexical,
 }
+
+/// Confidence assigned to a dominant lexical winner. BM25 scores are not
+/// comparable across prompts (they scale with query length and term rarity), so a
+/// scalar map would be dishonest; the dominance gate ([`crate::lexical::dominant`])
+/// has already established this is high-precision, so it reports a fixed High-band
+/// confidence — strong enough to drive an assertive directive, deliberately below
+/// [`crate::config::Config::body_inject_min`] so it stays a directive pointer
+/// rather than inlining a full SKILL.md off a lexical signal.
+pub const LEXICAL_CONF: f32 = 0.90;
 
 /// Coarse confidence band, driving phrasing forcefulness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +59,10 @@ pub fn of(score: f32, stage: Stage, cfg: &Config) -> f32 {
             let t = ((score - cfg.min_similarity) / COSINE_SPAN).clamp(0.0, 1.0);
             (0.5 + 0.47 * t).clamp(0.0, 0.99)
         }
+        // BM25 has no probabilistic meaning and no cross-prompt scale; the dominance
+        // gate already vouched for precision, so a dominant winner reports a fixed
+        // High-band confidence (see [`LEXICAL_CONF`]). `score` is ignored.
+        Stage::Lexical => LEXICAL_CONF,
     }
 }
 

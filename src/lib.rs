@@ -14,6 +14,7 @@ pub mod hook;
 pub mod index;
 pub mod init;
 pub mod inject;
+pub mod lexical;
 pub mod observe;
 pub mod paths;
 pub mod rank;

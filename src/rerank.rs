@@ -60,18 +60,27 @@ pub fn is_ambiguous(hits: &[Hit], cfg: &Config) -> bool {
     if top.score < cfg.recall_floor {
         return false; // nothing relevant; stage-1 floor rejects it anyway.
     }
-    // Confidence is measured on *cosine*, not the keyword-inflated `score`: a
-    // keyword boost (e.g. "commit" matching pre-commit-setup) can fake a high
-    // score and a clear gap, but that is precisely the noisy signal the
-    // cross-encoder exists to arbitrate, so it must never grant a rerank skip.
+    !confident_winner(hits, cfg)
+}
+
+/// Whether stage-1's top match is a *confident lone dense winner*: high absolute
+/// cosine *and* a clear gap to the runner-up. This is the one case the bi-encoder
+/// is trusted outright — it skips both the reranker and the lexical fast-path, so
+/// neither can override a strong dense match.
+///
+/// Confidence is measured on *cosine*, not the keyword-inflated `score`: a keyword
+/// boost (e.g. "commit" matching pre-commit-setup) can fake a high score and a
+/// clear gap, but that is precisely the noisy signal stage 2 exists to arbitrate,
+/// so it must never grant a skip.
+pub fn confident_winner(hits: &[Hit], cfg: &Config) -> bool {
+    if hits.is_empty() {
+        return false;
+    }
     let mut cos: Vec<f32> = hits.iter().map(|h| h.cosine).collect();
     cos.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let c1 = cos[0];
     let c2 = cos.get(1).copied().unwrap_or(0.0);
-    if c1 >= cfg.high_conf && (c1 - c2) >= cfg.clear_gap {
-        return false; // lone, confident winner.
-    }
-    true
+    c1 >= cfg.high_conf && (c1 - c2) >= cfg.clear_gap
 }
 
 /// Rerank the top-`cfg.rerank_top_k` stage-1 candidates with the cross-encoder,

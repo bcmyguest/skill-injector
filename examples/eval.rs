@@ -22,7 +22,7 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::Host;
 use ski::rank::Hit;
-use ski::{context, index, rank, rerank, skill};
+use ski::{context, index, lexical, rank, rerank, skill};
 
 struct Case {
     want: String, // "(none)" for a negative
@@ -68,14 +68,29 @@ fn parse_cases(raw: &str) -> Vec<Case> {
         .collect()
 }
 
-/// The skills the hook would inject for `hits` — mirrors `hook::select` /
-/// `hook::select_reranked` minus session dedup. Returns `(stage, injected_ids)`.
+/// The skills the hook would inject for `hits` — mirrors `hook::decide` (lexical
+/// fast-path, then stage-1 cosine / stage-2 rerank) minus session dedup. Returns
+/// `(stage, injected_hits)`.
 fn decide(
     hits: &[Hit],
     idx: &index::Index,
+    prompt: &str,
     rerank_query: &str,
     cfg: &Config,
 ) -> (&'static str, Vec<Hit>) {
+    // Stage 1.5: a dominant lexical winner injects directly (unless stage-1 already
+    // has a confident lone dense winner), skipping the reranker.
+    if !rerank::confident_winner(hits, cfg) {
+        if let Some(win) = lexical::dominant(prompt, idx, cfg) {
+            let kept: Vec<Hit> = hits
+                .iter()
+                .filter(|h| h.id == win.id && !cfg.deny.contains(&h.id))
+                .take(cfg.max_skills)
+                .cloned()
+                .collect();
+            return ("lexical", kept);
+        }
+    }
     let reranked = rerank::is_ambiguous(hits, cfg)
         .then(|| rerank::rerank(hits, idx, rerank_query, cfg))
         .flatten();
@@ -150,18 +165,28 @@ fn main() -> anyhow::Result<()> {
     if let Ok(v) = std::env::var("SKI_RERANK_MARGIN") {
         cfg.rerank_margin = v.parse().expect("SKI_RERANK_MARGIN must be a float");
     }
+    // Lexical fast-path (BM25 over description) sweep knobs: `lexical_min <= 0`
+    // disables it, so the same corpus can be scored with and without the channel.
+    if let Ok(v) = std::env::var("SKI_LEXICAL_MIN") {
+        cfg.lexical_min = v.parse().expect("SKI_LEXICAL_MIN must be a float");
+    }
+    if let Ok(v) = std::env::var("SKI_LEXICAL_MARGIN") {
+        cfg.lexical_margin = v.parse().expect("SKI_LEXICAL_MARGIN must be a float");
+    }
     let skills = skill::discover(&cfg.roots)?;
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
     file.apply_cosine(&mut cfg);
     let idx = index::build(&skills, embedder.as_ref(), None)?;
     eprintln!(
-        "index: {} skills via {} | rerank_min {:.2} margin {:.2} | min_sim {:.2}",
+        "index: {} skills via {} | rerank_min {:.2} margin {:.2} | min_sim {:.2} | lexical_min {:.2} margin {:.2}",
         idx.skills.len(),
         idx.model,
         cfg.rerank_min,
         cfg.rerank_margin,
         cfg.min_similarity,
+        cfg.lexical_min,
+        cfg.lexical_margin,
     );
 
     // Confusion counters. `borderline` rows are tallied separately (observe-only).
@@ -212,7 +237,7 @@ fn main() -> anyhow::Result<()> {
             !file_ids.is_empty(),
             &cfg,
         );
-        let (stage, injected) = decide(&hits, &idx, &rerank_query, &cfg);
+        let (stage, injected) = decide(&hits, &idx, &c.prompt, &rerank_query, &cfg);
         let ids: Vec<String> = injected.iter().map(|h| h.id.clone()).collect();
         let is_neg = c.want == "(none)";
         let observe_only = c.kind == "borderline";

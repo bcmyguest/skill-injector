@@ -135,6 +135,23 @@ pub struct Config {
     /// fluky stage-1 hit never triggers a body dump. Raise above `1.0` to disable.
     pub body_inject_min: f32,
 
+    // --- Stage-1.5 lexical channel (see `crate::lexical`). BM25 over the full skill
+    // description, a high-precision fast-path that injects a *dominant* lexical
+    // winner directly, skipping the reranker — it rescues indirect prompts whose
+    // discriminating vocabulary lives in the description prose but whose bi-encoder
+    // cosine is muddy and whose reranker logit falls below the abstention floor.
+    // Only fires when stage-1 has no confident lone dense winner. These thresholds
+    // are on BM25's own scale, unrelated to the cosine/logit thresholds above and
+    // untouched by `calibrate_to`. ---
+    /// Minimum absolute BM25 score for the top description match to be a lexical
+    /// winner. `<= 0` disables the channel entirely.
+    pub lexical_min: f32,
+    /// Minimum BM25 gap from the top description match to the runner-up for the top
+    /// to count as *dominant* (and thus inject directly, skipping the reranker). The
+    /// margin is what keeps the fast-path high-precision: a cluster of near-equal
+    /// descriptions abstains and defers to the reranker.
+    pub lexical_margin: f32,
+
     /// Append opt-in JSONL telemetry events (see [`crate::telemetry`]). Off by
     /// default. Enabled by this field *or* a truthy `SKI_TELEMETRY` env var —
     /// either one turns it on, so the env var still works without a config file.
@@ -260,6 +277,11 @@ impl Config {
             // confidence maps to <= ~0.85 for bge — never triggers it, so only the
             // reranker's strongest verdicts inline the full SKILL.md.
             body_inject_min: 0.92,
+            // Lexical fast-path off until tuned on the eval corpus (see `crate::lexical`
+            // and `examples/eval`). Sweep via `SKI_LEXICAL_MIN` / `SKI_LEXICAL_MARGIN`;
+            // set `lexical_min > 0` (with a validated margin) to enable.
+            lexical_min: 0.0,
+            lexical_margin: 0.0,
             telemetry: false,
         }
     }
@@ -306,6 +328,8 @@ pub struct FileConfig {
     pub rerank_min: Option<f32>,
     pub rerank_margin: Option<f32>,
     pub body_inject_min: Option<f32>,
+    pub lexical_min: Option<f32>,
+    pub lexical_margin: Option<f32>,
     pub telemetry: Option<bool>,
 }
 
@@ -400,6 +424,12 @@ impl FileConfig {
         }
         if let Some(v) = self.body_inject_min {
             cfg.body_inject_min = v;
+        }
+        if let Some(v) = self.lexical_min {
+            cfg.lexical_min = v;
+        }
+        if let Some(v) = self.lexical_margin {
+            cfg.lexical_margin = v;
         }
         if let Some(v) = self.telemetry {
             cfg.telemetry = v;

@@ -7,11 +7,17 @@
 //!
 //! Two event kinds, appended one JSON object per line to
 //! `$XDG_STATE_HOME/ski/telemetry.jsonl`:
-//! - `recommend` — what `ski hook` injected: the prompt, the stage, every
-//!   candidate's confidence, and which ids actually survived the char budget.
-//! - `use` — a skill the model loaded itself (seen by `ski observe`). Joining a
-//!   `use` to an earlier `recommend` by `session` + `skill` tells us whether a
-//!   recommendation was acted on.
+//! - `recommend` — what `ski hook` decided on a prompt. Emitted on **every**
+//!   ranked prompt, including the ones where ski injects nothing: the prompt, the
+//!   stage, the top-K `considered` ranking (id + raw stage score) the chooser
+//!   produced *before* the gate, the `candidates` that cleared the gate, which
+//!   ids survived the char budget (`injected`), and an `abstained` reason when
+//!   nothing was injected. The always-present `considered` list is what lets a
+//!   later analysis see where ski ranked a skill on a prompt it stayed silent on.
+//! - `use` — a skill the model loaded itself (seen by `ski observe`) — i.e. the
+//!   host's own (native) skill chooser's pick. Joining a `use` to the prompt's
+//!   `recommend` event by `session` + `prompt` tells us whether the native pick
+//!   was something ski injected, ranked-but-abstained-on, or never surfaced.
 //!
 //! Best-effort, like the rest of the hot path: any IO/serialization failure is
 //! swallowed so telemetry can never block or fail a prompt.
@@ -46,18 +52,34 @@ pub fn enabled() -> bool {
         )
 }
 
-/// Record an injection: the candidates that cleared the gate (`recs`) and the
-/// subset that fit the budget (`injected`, id + shown confidence).
+/// Record the hook's decision on a prompt. Emitted on every ranked prompt, even
+/// when ski injects nothing, so the always-present `considered` ranking records
+/// where ski placed each skill on a prompt it stayed silent on.
+///
+/// - `considered` — the top-K of the ranking the winning stage produced, *before*
+///   the gate: `(id, raw stage score)` (cosine-blend for stage 1, reranker logit
+///   for stage 2). This is the chooser's view; joining the native pick (a `use`
+///   event) against it shows whether ski near-missed or never surfaced it.
+/// - `recs` — the candidates that cleared the gate (empty on abstention).
+/// - `injected` — the subset that fit the char budget (id + shown confidence).
+/// - `abstained` — why nothing was injected (`Some("below_gate")` etc.), or
+///   `None` when an injection was emitted.
 pub fn record_recommend(
     session_id: &str,
     prompt: &str,
     stage: Stage,
+    considered: &[(String, f32)],
     recs: &[Rec],
     injected: &[(String, f32)],
+    abstained: Option<&str>,
 ) {
     if !enabled() {
         return;
     }
+    let considered: Vec<_> = considered
+        .iter()
+        .map(|(id, s)| json!({ "id": id, "score": s }))
+        .collect();
     let candidates: Vec<_> = recs
         .iter()
         .map(|r| json!({ "id": r.id, "confidence": r.confidence }))
@@ -66,15 +88,20 @@ pub fn record_recommend(
         .iter()
         .map(|(id, c)| json!({ "id": id, "confidence": c }))
         .collect();
-    append(&json!({
+    let mut ev = json!({
         "ts": now_ms(),
         "kind": "recommend",
         "session": session_id,
         "prompt": prompt,
         "stage": stage_str(stage),
+        "considered": considered,
         "candidates": candidates,
         "injected": injected,
-    }));
+    });
+    if let Some(reason) = abstained {
+        ev["abstained"] = json!(reason);
+    }
+    append(&ev);
 }
 
 /// Record that the model loaded `skill_id` itself. `via` is `"skill"` (the
@@ -114,6 +141,7 @@ fn stage_str(stage: Stage) -> &'static str {
     match stage {
         Stage::Cosine => "cosine",
         Stage::Rerank => "rerank",
+        Stage::Lexical => "lexical",
     }
 }
 

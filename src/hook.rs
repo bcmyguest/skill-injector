@@ -16,7 +16,7 @@ use crate::index::{self, Index};
 use crate::inject::Rec;
 use crate::rank::Hit;
 use crate::session::Session;
-use crate::{context, inject, paths, rank, rerank, skill, telemetry};
+use crate::{context, inject, lexical, paths, rank, rerank, skill, telemetry};
 use serde::Deserialize;
 use std::io::Read;
 use std::str::FromStr;
@@ -157,15 +157,46 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         session.last_prompt = event.prompt.clone();
         let _ = session.save(&session_path);
     }
-    // Stage 2: when stage-1 is ambiguous, let the cross-encoder decide; otherwise
-    // (confident winner or nothing relevant) keep the cheap stage-1 result. The
-    // stage that wins also sets which confidence mapping the recs carry.
-    let (mut selected, stage) = match rerank::is_ambiguous(&hits, &cfg)
-        .then(|| rerank::rerank(&hits, &idx, &rerank_query, &cfg))
-        .flatten()
-    {
-        Some(reranked) => (select_reranked(reranked, &cfg, &session), Stage::Rerank),
-        None => (select(hits, &cfg, &session), Stage::Cosine),
+    // Stage 1.5 + 2. Unless stage-1 already has a confident lone dense winner (which
+    // is trusted outright), a *dominant* lexical (BM25-over-description) winner
+    // injects directly — high precision exactly where the bi-encoder cosine is muddy.
+    // Otherwise the cross-encoder arbitrates the ambiguous middle, and a confident
+    // winner / nothing-relevant keeps the cheap stage-1 result. The stage that wins
+    // sets which confidence mapping the recs carry.
+    let lexical = (!rerank::confident_winner(&hits, &cfg))
+        .then(|| lexical::dominant(&event.prompt, &idx, &cfg))
+        .flatten();
+    // `considered` snapshots the top of the winning stage's ranking *before* the
+    // gate (id + raw stage score: BM25 for lexical, cosine-blend for stage 1,
+    // reranker logit for stage 2). Captured before `select*` consumes the hits, it
+    // is logged on every prompt — including abstentions — so a later native pick
+    // can be measured against where ski actually ranked it.
+    let (mut selected, stage, considered) = match lexical {
+        Some(win) => {
+            let considered = vec![(win.id.clone(), win.score)];
+            (
+                select_lexical(win, &cfg, &session),
+                Stage::Lexical,
+                considered,
+            )
+        }
+        None => match rerank::is_ambiguous(&hits, &cfg)
+            .then(|| rerank::rerank(&hits, &idx, &rerank_query, &cfg))
+            .flatten()
+        {
+            Some(reranked) => {
+                let considered = top_considered(&reranked);
+                (
+                    select_reranked(reranked, &cfg, &session),
+                    Stage::Rerank,
+                    considered,
+                )
+            }
+            None => {
+                let considered = top_considered(&hits);
+                (select(hits, &cfg, &session), Stage::Cosine, considered)
+            }
+        },
     };
     // Drop the skill the user invoked by slash command — recommending it back is
     // pure noise (the dominant false positive in telemetry: `/pickup` -> pickup).
@@ -173,6 +204,19 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         selected.retain(|r| &r.id != invoked);
     }
     if selected.is_empty() {
+        // Nothing cleared the gate (or dedup/deny/slash removal emptied it). Record
+        // the considered ranking anyway so a native pick on this prompt can be
+        // scored against where ski ranked it — the abstention case is the whole
+        // point of always logging.
+        telemetry::record_recommend(
+            &event.session_id,
+            &event.prompt,
+            stage,
+            &considered,
+            &[],
+            &[],
+            Some("below_gate"),
+        );
         return Ok(Decision::default());
     }
 
@@ -183,6 +227,15 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     let mode = inject_mode(&selected, &cfg);
     let (text, ids) = inject::build(&selected, &idx, mode, strength, cfg.char_budget);
     if text.is_empty() {
+        telemetry::record_recommend(
+            &event.session_id,
+            &event.prompt,
+            stage,
+            &considered,
+            &selected,
+            &[],
+            Some("empty_text"),
+        );
         return Ok(Decision::default());
     }
 
@@ -197,18 +250,36 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     }
     let _ = session.save(&session_path); // best-effort: state IO never blocks.
 
+    // Successful inject: `abstained` is None and `considered` carries the pre-gate
+    // ranking so the injected ids can be located within it during analysis.
     telemetry::record_recommend(
         &event.session_id,
         &event.prompt,
         stage,
+        &considered,
         &selected,
         &injected,
+        None,
     );
 
     Ok(Decision {
         inject: text,
         skills: ids,
     })
+}
+
+/// How many top-ranked skills to snapshot into a `recommend` event's `considered`
+/// list. Deep enough to locate a native pick that ski ranked but abstained on;
+/// anything past this reads as "ski never surfaced it" in the comparison.
+const CONSIDER_K: usize = 10;
+
+/// Top-`CONSIDER_K` of a ranking as `(id, raw stage score)` for telemetry — the
+/// chooser's pre-gate view. Hits arrive already sorted by descending score.
+fn top_considered(hits: &[Hit]) -> Vec<(String, f32)> {
+    hits.iter()
+        .take(CONSIDER_K)
+        .map(|h| (h.id.clone(), h.score))
+        .collect()
 }
 
 /// Host-generated control payloads that arrive on the prompt channel but aren't
@@ -309,6 +380,24 @@ fn select_reranked(reranked: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<R
         .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
         .take(cfg.max_skills)
         .collect()
+}
+
+/// Guardrails for the lexical fast-path. A dominant BM25 winner is a single skill
+/// at a fixed High-band confidence ([`confidence::LEXICAL_CONF`]); this drops it if
+/// denied or already loaded this session, mirroring the tail of [`select`] for the
+/// one-skill case.
+fn select_lexical(win: crate::lexical::Lex, cfg: &Config, session: &Session) -> Vec<Rec> {
+    if cfg.deny.contains(&win.id) {
+        return Vec::new();
+    }
+    let rec = Rec {
+        confidence: confidence::of(win.score, Stage::Lexical, cfg),
+        id: win.id,
+    };
+    if !session.should_recommend(&rec.id, rec.confidence, confidence::HIGH) {
+        return Vec::new();
+    }
+    vec![rec]
 }
 
 /// Pick the inject shape for the chosen `recs`. Normally `cfg.inject_mode`, but a

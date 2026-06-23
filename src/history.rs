@@ -38,6 +38,14 @@ pub struct Cand {
     pub confidence: f32,
 }
 
+/// One entry of a `recommend` event's pre-gate `considered` ranking: a skill and
+/// the raw stage score it was ranked at (cosine-blend, reranker logit, or BM25).
+#[derive(Debug, PartialEq)]
+pub struct Ranked {
+    pub id: String,
+    pub score: f32,
+}
+
 /// A single `recommend` event, fully parsed for the `--tail` listing.
 #[derive(Debug, PartialEq)]
 pub struct RecEvent {
@@ -45,10 +53,17 @@ pub struct RecEvent {
     pub session: String,
     pub stage: String,
     pub prompt: String,
+    /// The pre-gate ranking ski considered (top-K, id + raw stage score). Present
+    /// on every prompt, including abstentions — the field the `--compare` view
+    /// joins a native pick against. Empty for events logged before this field.
+    pub considered: Vec<Ranked>,
     /// Every candidate that cleared the gate.
     pub candidates: Vec<Cand>,
     /// The subset that fit the char budget and was actually injected.
     pub injected: Vec<Cand>,
+    /// Why nothing was injected (`below_gate`, `empty_text`), or `None` on a
+    /// successful inject.
+    pub abstained: Option<String>,
 }
 
 /// A single `use` event (the model loaded a skill itself), for the `--tail`
@@ -83,8 +98,13 @@ pub fn recommend_events(log: &str) -> Vec<RecEvent> {
             session: str_field(&v, "session"),
             stage: str_field(&v, "stage"),
             prompt: str_field(&v, "prompt"),
+            considered: parse_ranked(v.get("considered")),
             candidates: parse_cands(v.get("candidates")),
             injected: parse_cands(v.get("injected")),
+            abstained: v
+                .get("abstained")
+                .and_then(|a| a.as_str())
+                .map(str::to_string),
         });
     }
     out
@@ -173,6 +193,20 @@ fn parse_cands(v: Option<&serde_json::Value>) -> Vec<Cand> {
         .unwrap_or_default()
 }
 
+fn parse_ranked(v: Option<&serde_json::Value>) -> Vec<Ranked> {
+    v.and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let id = item.get("id")?.as_str()?.to_string();
+                    let score = item.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) as f32;
+                    Some(Ranked { id, score })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Aggregate raw JSONL log text. Pure, so it is unit-testable without IO.
 pub fn aggregate(log: &str) -> Stats {
     // Per session: the set of recommended skill ids and the set of used skill ids.
@@ -238,10 +272,115 @@ pub fn aggregate(log: &str) -> Stats {
     stats
 }
 
+/// Rank at/under which an abstained-on native pick counts as a near-miss (a
+/// tunable edge) rather than buried. ski's top few are the realistically
+/// reachable band for a looser gate or a stronger retrieval channel.
+const NEAR_MISS_RANK: usize = 3;
+
+/// How ski's ranking lines up with the native chooser's pick on one prompt.
+#[derive(Debug, PartialEq)]
+pub enum Verdict {
+    /// ski injected the same skill the model then used. Redundant — and because
+    /// the model saw ski's nudge first, this does *not* prove ski caused the pick.
+    Agreed,
+    /// ski abstained but ranked the native pick in its top [`NEAR_MISS_RANK`] —
+    /// the tunable edge: a looser gate or stronger channel could have surfaced it.
+    NearMiss { rank: usize, score: f32 },
+    /// ski abstained and ranked the native pick deeper in its considered top-K.
+    Buried { rank: usize, score: f32 },
+    /// ski never surfaced the native pick in its considered top-K — the retrieval
+    /// ceiling; narrowing the gate cannot win this one.
+    Absent,
+    /// No considered ranking was logged for the prompt (telemetry was off then, or
+    /// a pre-feature event), so the pick can't be placed.
+    NoRanking,
+}
+
+/// One native-chooser pick (a `use` event) joined to ski's ranking on the same
+/// prompt (the matching `recommend` event).
+#[derive(Debug, PartialEq)]
+pub struct CompareRow {
+    pub session: String,
+    pub prompt: String,
+    pub stage: String,
+    /// The skill the native chooser picked.
+    pub native: String,
+    pub via: String,
+    pub verdict: Verdict,
+}
+
+/// Join every native-chooser pick to where ski ranked it on the same prompt.
+/// Pure, so the classification is unit-testable without IO. A `use` is matched to
+/// the latest `recommend` event with the same session + prompt at/just before it.
+pub fn compare(log: &str) -> Vec<CompareRow> {
+    let recs = recommend_events(log);
+    use_events(log)
+        .into_iter()
+        .map(|u| {
+            let rec = match_recommend(&recs, &u);
+            let (stage, verdict) = match rec {
+                None => (String::new(), Verdict::NoRanking),
+                Some(r) => (r.stage.clone(), classify(r, &u.skill)),
+            };
+            CompareRow {
+                session: u.session,
+                prompt: u.prompt,
+                stage,
+                native: u.skill,
+                via: u.via,
+                verdict,
+            }
+        })
+        .collect()
+}
+
+/// The `recommend` event a `use` should be scored against: same session + prompt,
+/// preferring the latest one at or before the use (the call that was active), and
+/// falling back to the earliest match when none precede it (clock skew / ordering).
+fn match_recommend<'a>(recs: &'a [RecEvent], u: &UseEvent) -> Option<&'a RecEvent> {
+    if u.prompt.is_empty() {
+        return None;
+    }
+    let mut matches: Vec<&RecEvent> = recs
+        .iter()
+        .filter(|r| r.session == u.session && r.prompt == u.prompt)
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort_by_key(|r| r.ts);
+    matches
+        .iter()
+        .rev()
+        .find(|r| r.ts <= u.ts)
+        .or_else(|| matches.first())
+        .copied()
+}
+
+/// Place `native` (the picked skill) within one recommend event's outcome.
+fn classify(r: &RecEvent, native: &str) -> Verdict {
+    if r.injected.iter().any(|c| c.id == native) {
+        return Verdict::Agreed;
+    }
+    match r.considered.iter().position(|c| c.id == native) {
+        Some(i) => {
+            let rank = i + 1;
+            let score = r.considered[i].score;
+            if rank <= NEAR_MISS_RANK {
+                Verdict::NearMiss { rank, score }
+            } else {
+                Verdict::Buried { rank, score }
+            }
+        }
+        None => Verdict::Absent,
+    }
+}
+
 /// `ski history`: read the telemetry log. With `tail`, list that many recent
-/// recommendation events individually; otherwise print the aggregate readout.
+/// recommendation events individually; with `compare`, show ski's pick vs the
+/// native chooser's pick per prompt; otherwise print the aggregate readout.
 /// `session` filters the listing to sessions whose id contains the substring.
-pub fn run(tail: Option<usize>, session: Option<&str>) -> anyhow::Result<()> {
+pub fn run(tail: Option<usize>, session: Option<&str>, compare_view: bool) -> anyhow::Result<()> {
     let path = paths::telemetry_path();
     let Ok(log) = fs::read_to_string(&path) else {
         println!(
@@ -250,9 +389,13 @@ pub fn run(tail: Option<usize>, session: Option<&str>) -> anyhow::Result<()> {
         );
         return Ok(());
     };
-    match tail {
-        Some(n) => print_events(&log, n, session),
-        None => print_aggregate(&log),
+    if compare_view {
+        print_compare(&log, session);
+    } else {
+        match tail {
+            Some(n) => print_events(&log, n, session),
+            None => print_aggregate(&log),
+        }
     }
     Ok(())
 }
@@ -367,6 +510,88 @@ fn print_aggregate(log: &str) {
     );
     print_top("top false positives", &s.fp_by_skill);
     print_top("top recall misses", &s.miss_by_skill);
+}
+
+/// The `--compare` view: every native-chooser pick joined to where ski ranked it.
+/// The whole point is the NEAR-MISS bucket — prompts the model found a skill on
+/// that ski ranked but gated out — versus ABSENT, where ski never surfaced it.
+fn print_compare(log: &str, session_filter: Option<&str>) {
+    let rows: Vec<CompareRow> = compare(log)
+        .into_iter()
+        .filter(|r| session_filter.is_none_or(|sf| r.session.contains(sf)))
+        .collect();
+    if rows.is_empty() {
+        println!("no native-chooser picks logged (need `use` events; enable SKI_TELEMETRY=1)");
+        return;
+    }
+    let sessions: BTreeSet<&str> = rows.iter().map(|r| r.session.as_str()).collect();
+    let (mut agreed, mut near, mut buried, mut absent, mut no_rank) = (0, 0, 0, 0, 0);
+    for r in &rows {
+        match r.verdict {
+            Verdict::Agreed => agreed += 1,
+            Verdict::NearMiss { .. } => near += 1,
+            Verdict::Buried { .. } => buried += 1,
+            Verdict::Absent => absent += 1,
+            Verdict::NoRanking => no_rank += 1,
+        }
+    }
+    println!(
+        "ski vs native chooser — {} picks across {} sessions",
+        rows.len(),
+        sessions.len()
+    );
+    println!("  agreed (ski injected it too):                {agreed}");
+    println!("  NEAR-MISS (ski ranked it ≤{NEAR_MISS_RANK}, abstained): {near}   <- tunable edge");
+    println!("  buried (ranked deeper, abstained):           {buried}");
+    println!("  absent (ski never surfaced it):              {absent}   <- retrieval ceiling");
+    if no_rank > 0 {
+        println!("  no ranking logged for the prompt:            {no_rank}");
+    }
+    println!(
+        "\nnote: native picks are observed *after* ski injects, so \"agreed\" doesn't prove ski\n\
+         caused it. The clean edge signal is NEAR-MISS/buried — the model found a skill itself\n\
+         that ski ranked but gated out."
+    );
+
+    // Edge candidates: native picked it, ski ranked but abstained. Best rank first.
+    let mut edges: Vec<(usize, f32, &CompareRow)> = rows
+        .iter()
+        .filter_map(|r| match r.verdict {
+            Verdict::NearMiss { rank, score } | Verdict::Buried { rank, score } => {
+                Some((rank, score, r))
+            }
+            _ => None,
+        })
+        .collect();
+    edges.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.prompt.cmp(&b.2.prompt)));
+    if !edges.is_empty() {
+        println!("\nedge candidates (native picked it, ski abstained):");
+        for (rank, score, r) in &edges {
+            println!(
+                "  {:<60} -> {} via {}  ski #{rank} score {score:.3}  [{}]",
+                truncate(&r.prompt, 60),
+                r.native,
+                r.via,
+                if r.stage.is_empty() { "?" } else { &r.stage },
+            );
+        }
+    }
+
+    let absent_rows: Vec<&CompareRow> = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::Absent)
+        .collect();
+    if !absent_rows.is_empty() {
+        println!("\nabsent (ski never surfaced — retrieval miss):");
+        for r in &absent_rows {
+            println!(
+                "  {:<60} -> {} via {}",
+                truncate(&r.prompt, 60),
+                r.native,
+                r.via
+            );
+        }
+    }
 }
 
 /// `ski clear`: wipe per-session dedup state; with `telemetry`, also the log.
@@ -570,5 +795,116 @@ garbage
         assert_eq!(truncate("a\nb", 10), "a b");
         assert_eq!(truncate("abcdef", 3), "abc…");
         assert_eq!(short("sess-abcdef-1"), "sess-abc");
+    }
+
+    #[test]
+    fn recommend_events_parse_considered_and_abstained() {
+        let log = r#"
+{"ts":1,"kind":"recommend","session":"s","stage":"rerank","prompt":"p","considered":[{"id":"xlsx","score":-1.96},{"id":"pdf","score":-2.1}],"candidates":[],"injected":[],"abstained":"below_gate"}
+"#;
+        let evs = recommend_events(log);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(
+            evs[0].considered,
+            vec![
+                Ranked {
+                    id: "xlsx".into(),
+                    score: -1.96
+                },
+                Ranked {
+                    id: "pdf".into(),
+                    score: -2.1
+                },
+            ]
+        );
+        assert_eq!(evs[0].abstained.as_deref(), Some("below_gate"));
+        // A legacy event without the new fields parses to empty/None, not an error.
+        let legacy =
+            r#"{"kind":"recommend","session":"s","injected":[{"id":"pdf","confidence":0.7}]}"#;
+        let ev = &recommend_events(legacy)[0];
+        assert!(ev.considered.is_empty());
+        assert_eq!(ev.abstained, None);
+    }
+
+    // One recommend + one use per session, exercising each verdict.
+    const COMPARE_LOG: &str = r#"
+{"ts":1000,"kind":"recommend","session":"s1","stage":"rerank","prompt":"make a chart","considered":[{"id":"xlsx","score":-1.9},{"id":"pdf","score":-2.1}],"candidates":[],"injected":[],"abstained":"below_gate"}
+{"ts":1100,"kind":"use","session":"s1","skill":"xlsx","via":"skill","prompt":"make a chart"}
+{"ts":2000,"kind":"recommend","session":"s2","stage":"cosine","prompt":"set up python","considered":[{"id":"uv-setup","score":0.7}],"candidates":[{"id":"uv-setup","confidence":0.7}],"injected":[{"id":"uv-setup","confidence":0.7}]}
+{"ts":2100,"kind":"use","session":"s2","skill":"uv-setup","via":"skill","prompt":"set up python"}
+{"ts":3000,"kind":"recommend","session":"s3","stage":"rerank","prompt":"deep","considered":[{"id":"a","score":0.1},{"id":"b","score":0.1},{"id":"c","score":0.1},{"id":"d","score":0.1},{"id":"gold","score":0.0}],"candidates":[],"injected":[],"abstained":"below_gate"}
+{"ts":3100,"kind":"use","session":"s3","skill":"gold","via":"read","prompt":"deep"}
+{"ts":4000,"kind":"recommend","session":"s4","stage":"cosine","prompt":"weird","considered":[{"id":"x","score":0.2}],"candidates":[],"injected":[],"abstained":"below_gate"}
+{"ts":4100,"kind":"use","session":"s4","skill":"notranked","via":"skill","prompt":"weird"}
+{"ts":5100,"kind":"use","session":"s5","skill":"orphan","via":"skill","prompt":"no rec here"}
+"#;
+
+    #[test]
+    fn compare_classifies_each_verdict() {
+        let rows = compare(COMPARE_LOG);
+        let by: std::collections::HashMap<&str, &Verdict> = rows
+            .iter()
+            .map(|r| (r.native.as_str(), &r.verdict))
+            .collect();
+        assert_eq!(
+            by["xlsx"],
+            &Verdict::NearMiss {
+                rank: 1,
+                score: -1.9
+            }
+        );
+        assert_eq!(by["uv-setup"], &Verdict::Agreed);
+        assert_eq!(
+            by["gold"],
+            &Verdict::Buried {
+                rank: 5,
+                score: 0.0
+            }
+        );
+        assert_eq!(by["notranked"], &Verdict::Absent);
+        // A use with no matching recommend (or no prompt) can't be placed.
+        assert_eq!(by["orphan"], &Verdict::NoRanking);
+    }
+
+    #[test]
+    fn classify_near_miss_rank_boundary() {
+        // rank == NEAR_MISS_RANK is still a near-miss; one deeper is buried.
+        let log = r#"
+{"ts":1,"kind":"recommend","session":"s","stage":"rerank","prompt":"p","considered":[{"id":"a","score":0.3},{"id":"b","score":0.2},{"id":"gold","score":0.1},{"id":"d","score":0.0}],"candidates":[],"injected":[],"abstained":"below_gate"}
+"#;
+        let ev = &recommend_events(log)[0];
+        assert_eq!(
+            classify(ev, "gold"),
+            Verdict::NearMiss {
+                rank: 3,
+                score: 0.1
+            }
+        );
+        assert_eq!(
+            classify(ev, "d"),
+            Verdict::Buried {
+                rank: 4,
+                score: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn match_recommend_prefers_latest_at_or_before_use() {
+        // Same prompt ranked twice; the use should bind to the one active at its time.
+        let log = r#"
+{"ts":1000,"kind":"recommend","session":"s","stage":"cosine","prompt":"p","considered":[{"id":"a","score":0.5}],"candidates":[],"injected":[],"abstained":"below_gate"}
+{"ts":3000,"kind":"recommend","session":"s","stage":"cosine","prompt":"p","considered":[{"id":"a","score":0.9}],"candidates":[],"injected":[],"abstained":"below_gate"}
+"#;
+        let recs = recommend_events(log);
+        let u = UseEvent {
+            ts: 2000,
+            session: "s".into(),
+            skill: "a".into(),
+            via: "skill".into(),
+            prompt: "p".into(),
+        };
+        // ts 2000 binds to the 1000 event (latest at/before), not the later 3000 one.
+        assert_eq!(match_recommend(&recs, &u).unwrap().ts, 1000);
     }
 }

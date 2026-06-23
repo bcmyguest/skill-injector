@@ -7,7 +7,7 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::{self, Host};
 use ski::index::{self, Index};
-use ski::{history, init, observe, paths, rank, rerank, session_start, skill};
+use ski::{history, init, lexical, observe, paths, rank, rerank, session_start, skill};
 
 #[derive(Parser)]
 #[command(
@@ -75,7 +75,10 @@ enum Cmd {
     /// Read the opt-in telemetry log (recommendations vs. actual use). Default is
     /// the aggregate readout; `--tail N` lists recent calls individually —
     /// recommendations (prompt, per-candidate confidence, used?) and self-loads
-    /// (acted-on-rec vs. recall miss). Empty unless hooks ran with `SKI_TELEMETRY=1`.
+    /// (acted-on-rec vs. recall miss). `--compare` shows ski's ranking vs the
+    /// native chooser's actual pick per prompt (agreed / near-miss / buried /
+    /// absent) — where ski could get an edge. Empty unless hooks ran with
+    /// `SKI_TELEMETRY=1`.
     History {
         /// List the most recent N events individually (recommendations and
         /// self-loads, newest last) instead of the aggregate.
@@ -84,6 +87,10 @@ enum Cmd {
         /// When listing, only events whose session id contains this substring.
         #[arg(long)]
         session: Option<String>,
+        /// Show ski's ranking vs the native chooser's pick per prompt, classified
+        /// by where ski ranked what the model actually used.
+        #[arg(long)]
+        compare: bool,
     },
     /// Wipe per-session dedup state (re-arm injection for testing).
     Clear {
@@ -102,7 +109,11 @@ fn main() -> Result<()> {
         Cmd::Observe { host } => observe::run(host.parse::<Host>()?),
         Cmd::SessionStart { host } => session_start::run(host.parse::<Host>()?),
         Cmd::Init { host, global } => init::run(host.parse::<Host>()?, global),
-        Cmd::History { tail, session } => history::run(tail, session.as_deref()),
+        Cmd::History {
+            tail,
+            session,
+            compare,
+        } => history::run(tail, session.as_deref(), compare),
         Cmd::Clear { telemetry } => history::clear(telemetry),
     }
 }
@@ -144,6 +155,9 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
         .embed(&[prompt.to_string()], EmbedKind::Query)?
         .remove(0);
     let hits = rank::rank_all(&query, prompt, &idx, &cfg);
+    // Captured before the match consumes `hits`: whether stage-1 has a confident
+    // lone dense winner, which suppresses the lexical fast-path (shown below).
+    let dense_confident = rerank::confident_winner(&hits, &cfg);
 
     // Mirror the hook's decision so `why` (and the eval that drives it) reflects
     // the real pipeline: stage-1 cosine, or stage-2 reranker logits when the gate
@@ -185,6 +199,38 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
             "{mark} {:<26} score {:.3}  (cos {:.3} + ctx {:.3} + file {:.3} + kw {:.3} + ph {:.3})",
             h.name, h.score, h.cosine, h.context, h.file, h.keyword, h.phrase
         );
+    }
+
+    // Lexical (BM25-over-description) channel: a dominant winner would inject
+    // directly, skipping the reranker (unless stage-1 has a confident lone dense
+    // winner). Shown as a tuning aid — the top BM25 scores and whether the dominance
+    // gate fires at the active `lexical_min` / `lexical_margin`.
+    let lex = lexical::scores(prompt, &idx);
+    if let Some(top) = lex.first() {
+        let second = lex.get(1).map(|l| l.score).unwrap_or(0.0);
+        let fires = lexical::dominant(prompt, &idx, &cfg).is_some();
+        let verdict = if cfg.lexical_min <= 0.0 {
+            "off".to_string()
+        } else if dense_confident {
+            "deferred (confident dense winner)".to_string()
+        } else if fires {
+            format!("FIRES -> {}", top.id)
+        } else {
+            "no dominant winner".to_string()
+        };
+        println!(
+            "\nlexical(BM25): min {:.2} margin {:.2} -> {verdict}",
+            cfg.lexical_min, cfg.lexical_margin,
+        );
+        println!(
+            "  top gap {:.3} (#1 {:.3} - #2 {:.3})",
+            top.score - second,
+            top.score,
+            second
+        );
+        for l in lex.iter().take(5) {
+            println!("  {:<26} bm25 {:.3}", l.id, l.score);
+        }
     }
     Ok(())
 }
