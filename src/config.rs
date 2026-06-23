@@ -277,9 +277,26 @@ impl Config {
             // confidence maps to <= ~0.85 for bge — never triggers it, so only the
             // reranker's strongest verdicts inline the full SKILL.md.
             body_inject_min: 0.92,
-            // Lexical fast-path off until tuned on the eval corpus (see `crate::lexical`
-            // and `examples/eval`). Sweep via `SKI_LEXICAL_MIN` / `SKI_LEXICAL_MARGIN`;
-            // set `lexical_min > 0` (with a validated margin) to enable.
+            // Lexical fast-path: **off by default** (like `project_boost` / the dense
+            // blend) — the eval gives it no free win on the realistic tuning corpus.
+            // Measured across `examples/eval` (sweep `SKI_LEXICAL_MIN` /
+            // `SKI_LEXICAL_MARGIN`):
+            //   * It clearly helps *indirect task* prompts whose operation is spelled
+            //     out in the description but whose cosine is muddy and reranker logit
+            //     sub-floor — the document/design corpus jumps +4..+8 recall ("compute
+            //     the totals and make a chart in my spreadsheet" -> xlsx; "OCR this
+            //     scanned pdf" -> pdf; "looping reaction gif for slack" ->
+            //     slack-gif-creator). These are dense+rerank abstentions.
+            //   * It *hurts* on knowledge/explainer negatives that merely name a
+            //     technology ("what year was rust released" -> rust-async-patterns;
+            //     "difference between a docker container and a VM" -> docker-expert): a
+            //     rare term dominantly hits one description and false-injects. The
+            //     2-term overlap guard (`lexical::MIN_TERM_OVERLAP`) does not catch them.
+            // No single threshold is a free win on the realistic corpus: the setting
+            // that captures the big indirect-recall gain (min ~4, margin ~2) adds ~3
+            // false injects there, while the do-no-harm setting (min ~6, margin ~5) is
+            // near-neutral. Recommended opt-in for indirect-heavy libraries:
+            // `lexical_min = 4`, `lexical_margin = 2`.
             lexical_min: 0.0,
             lexical_margin: 0.0,
             telemetry: false,
