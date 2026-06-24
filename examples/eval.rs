@@ -28,11 +28,12 @@
 //! `recall_rate - FP_HARM * fp_rate` with `FP_HARM` small ([`FP_HARM`]): optimise
 //! THIS, not FP count. Raw recall and FP rate are still printed for diagnosis.
 
+use ski::confidence::Stage;
 use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::Host;
 use ski::rank::Hit;
-use ski::{context, index, lexical, rank, rerank, skill};
+use ski::{context, index, pipeline, rank, skill};
 
 /// Per-false-inject harm, relative to a recall miss costing 1.0, used by the
 /// `host-value` headline. A strong host ignores false injects even when phrased
@@ -84,55 +85,6 @@ fn parse_cases(raw: &str) -> Vec<Case> {
             })
         })
         .collect()
-}
-
-/// The skills the hook would inject for `hits` — mirrors `hook::decide` (lexical
-/// fast-path, then stage-1 cosine / stage-2 rerank) minus session dedup. Returns
-/// `(stage, injected_hits)`.
-fn decide(
-    hits: &[Hit],
-    idx: &index::Index,
-    prompt: &str,
-    rerank_query: &str,
-    cfg: &Config,
-) -> (&'static str, Vec<Hit>) {
-    // Stage 1.5: a dominant lexical winner injects directly (unless stage-1 already
-    // has a confident lone dense winner), skipping the reranker.
-    if !rerank::confident_winner(hits, cfg) {
-        if let Some(win) = lexical::dominant(prompt, idx, cfg) {
-            let kept: Vec<Hit> = hits
-                .iter()
-                .filter(|h| h.id == win.id && !cfg.deny.contains(&h.id))
-                .take(cfg.max_skills)
-                .cloned()
-                .collect();
-            return ("lexical", kept);
-        }
-    }
-    let reranked = rerank::is_ambiguous(hits, cfg)
-        .then(|| rerank::rerank(hits, idx, rerank_query, cfg))
-        .flatten();
-    match reranked {
-        Some(r) => {
-            let kept: Vec<Hit> = rerank::passes(&r, cfg)
-                .into_iter()
-                .filter(|h| !cfg.deny.contains(&h.id))
-                .take(cfg.max_skills)
-                .collect();
-            ("rerank", kept)
-        }
-        None => {
-            let top = hits.first().map(|h| h.score).unwrap_or(0.0);
-            let kept: Vec<Hit> = hits
-                .iter()
-                .filter(|h| !cfg.deny.contains(&h.id))
-                .filter(|h| h.score >= cfg.min_similarity && h.score >= top - cfg.score_margin)
-                .take(cfg.max_skills)
-                .cloned()
-                .collect();
-            ("stage1", kept)
-        }
-    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -255,7 +207,20 @@ fn main() -> anyhow::Result<()> {
             !file_ids.is_empty(),
             &cfg,
         );
-        let (stage, injected) = decide(&hits, &idx, &c.prompt, &rerank_query, &cfg);
+        let plan = pipeline::decide(&hits, &idx, &c.prompt, &rerank_query, &cfg);
+        let stage = match plan.stage {
+            Stage::Lexical => "lexical",
+            Stage::Rerank => "rerank",
+            Stage::Cosine => "stage1",
+        };
+        // Caller-side guardrails: the hook's `finalize` minus session dedup (the eval
+        // has no session) — drop denied skills, cap at `max_skills`.
+        let injected: Vec<Hit> = plan
+            .passed
+            .into_iter()
+            .filter(|h| !cfg.deny.contains(&h.id))
+            .take(cfg.max_skills)
+            .collect();
         let ids: Vec<String> = injected.iter().map(|h| h.id.clone()).collect();
         let is_neg = c.want == "(none)";
         let observe_only = c.kind == "borderline";

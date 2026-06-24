@@ -16,7 +16,7 @@ use crate::index::{self, Index};
 use crate::inject::Rec;
 use crate::rank::Hit;
 use crate::session::Session;
-use crate::{context, inject, lexical, paths, rank, rerank, skill, telemetry};
+use crate::{context, inject, paths, pipeline, rank, skill, telemetry};
 use serde::Deserialize;
 use std::io::Read;
 use std::str::FromStr;
@@ -157,47 +157,22 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         session.last_prompt = event.prompt.clone();
         let _ = session.save(&session_path);
     }
-    // Stage 1.5 + 2. Unless stage-1 already has a confident lone dense winner (which
-    // is trusted outright), a *dominant* lexical (BM25-over-description) winner
-    // injects directly — high precision exactly where the bi-encoder cosine is muddy.
-    // Otherwise the cross-encoder arbitrates the ambiguous middle, and a confident
-    // winner / nothing-relevant keeps the cheap stage-1 result. The stage that wins
-    // sets which confidence mapping the recs carry.
-    let lexical = (!rerank::confident_winner(&hits, &cfg))
-        .then(|| lexical::dominant(&event.prompt, &idx, &cfg))
-        .flatten();
-    // `considered` snapshots the top of the winning stage's ranking *before* the
-    // gate (id + raw stage score: BM25 for lexical, cosine-blend for stage 1,
-    // reranker logit for stage 2). Captured before `select*` consumes the hits, it
-    // is logged on every prompt — including abstentions — so a later native pick
-    // can be measured against where ski actually ranked it.
-    let (mut selected, stage, considered) = match lexical {
-        Some(win) => {
-            let considered = vec![(win.id.clone(), win.score)];
-            (
-                select_lexical(win, &cfg, &session),
-                Stage::Lexical,
-                considered,
-            )
-        }
-        None => match rerank::is_ambiguous(&hits, &cfg)
-            .then(|| rerank::rerank(&hits, &idx, &rerank_query, &cfg))
-            .flatten()
-        {
-            Some(reranked) => {
-                let considered = top_considered(&reranked);
-                (
-                    select_reranked(reranked, &cfg, &session),
-                    Stage::Rerank,
-                    considered,
-                )
-            }
-            None => {
-                let considered = top_considered(&hits);
-                (select(hits, &cfg, &session), Stage::Cosine, considered)
-            }
-        },
+    // Stage 1.5 + 2 cascade — single-sourced in `pipeline`, shared with `ski why`
+    // and `examples/eval`: a dominant lexical (BM25) winner injects directly unless
+    // stage-1 has a confident lone dense winner; else the cross-encoder arbitrates
+    // the ambiguous middle; else the cheap stage-1 cosine result stands. The winning
+    // stage sets which confidence mapping the recs carry.
+    let plan = pipeline::decide(&hits, &idx, &event.prompt, &rerank_query, &cfg);
+    let stage = plan.stage;
+    // `considered` snapshots the top of the winning stage's ranking *before* the gate
+    // (id + raw stage score: BM25 for lexical, cosine-blend for stage 1, reranker
+    // logit for stage 2). Logged on every prompt — including abstentions — so a later
+    // native pick can be measured against where ski actually ranked it.
+    let considered = match &plan.lexical {
+        Some(win) => vec![(win.id.clone(), win.score)],
+        None => top_considered(&plan.rows),
     };
+    let mut selected = finalize(&plan.passed, stage, &cfg, &session);
     // Drop the skill the user invoked by slash command — recommending it back is
     // pure noise (the dominant false positive in telemetry: `/pickup` -> pickup).
     if let Some(invoked) = &invoked_skill {
@@ -342,65 +317,28 @@ fn load_or_build_index(
     Ok(idx)
 }
 
-/// Apply the guardrails: drop denied skills, keep those that clear both the
-/// absolute floor (`min_similarity`) and the relative gate (within `score_margin`
-/// of the best-scoring skill) — or are forced on a keyword hit — attach a
-/// stage-1 confidence, drop any the session's score-aware dedup rejects, and cap
-/// at `max_skills`.
+/// Apply the caller-side guardrails to the gate survivors from [`pipeline::decide`]:
+/// drop denied skills, attach the winning stage's confidence, drop any the session's
+/// score-aware dedup rejects, and cap at `max_skills`. The stage gate itself — the
+/// absolute floor / relative margin / reranker thresholds / lexical dominance —
+/// already ran in `pipeline`, measured against the global best *before* this dedup,
+/// so re-injecting a prompt whose strong matches are already loaded falls silent
+/// rather than scraping the weak tail.
 ///
-/// The relative gate is measured against the global best **before** session
-/// dedup, so re-injecting a prompt whose strong matches are already loaded falls
-/// silent instead of scraping the weak tail.
-fn select(hits: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Rec> {
-    let top = hits.first().map(|h| h.score).unwrap_or(0.0);
-    hits.into_iter()
+/// Uniform across stages: for the lexical winner the `Stage::Lexical` mapping is a
+/// fixed High-band confidence ([`confidence::LEXICAL_CONF`]) that ignores the score;
+/// the reranker uses its logit; stage-1 uses its cosine blend.
+fn finalize(passed: &[Hit], stage: Stage, cfg: &Config, session: &Session) -> Vec<Rec> {
+    passed
+        .iter()
         .filter(|h| !cfg.deny.contains(&h.id))
-        .filter(|h| {
-            let forced = cfg.force.contains(&h.id) && h.keyword > 0.0;
-            forced || (h.score >= cfg.min_similarity && h.score >= top - cfg.score_margin)
-        })
         .map(|h| Rec {
-            confidence: confidence::of(h.score, Stage::Cosine, cfg),
-            id: h.id,
+            confidence: confidence::of(h.score, stage, cfg),
+            id: h.id.clone(),
         })
         .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
         .take(cfg.max_skills)
         .collect()
-}
-
-/// Guardrails for the reranked path. The reranker scores already passed their own
-/// floor/margin in [`rerank::passes`], so this attaches a reranker-scale
-/// confidence, drops denied and dedup-rejected skills, and caps the count — the
-/// reranker-scale equivalent of the tail of [`select`].
-fn select_reranked(reranked: Vec<Hit>, cfg: &Config, session: &Session) -> Vec<Rec> {
-    rerank::passes(&reranked, cfg)
-        .into_iter()
-        .filter(|h| !cfg.deny.contains(&h.id))
-        .map(|h| Rec {
-            confidence: confidence::of(h.score, Stage::Rerank, cfg),
-            id: h.id,
-        })
-        .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
-        .take(cfg.max_skills)
-        .collect()
-}
-
-/// Guardrails for the lexical fast-path. A dominant BM25 winner is a single skill
-/// at a fixed High-band confidence ([`confidence::LEXICAL_CONF`]); this drops it if
-/// denied or already loaded this session, mirroring the tail of [`select`] for the
-/// one-skill case.
-fn select_lexical(win: crate::lexical::Lex, cfg: &Config, session: &Session) -> Vec<Rec> {
-    if cfg.deny.contains(&win.id) {
-        return Vec::new();
-    }
-    let rec = Rec {
-        confidence: confidence::of(win.score, Stage::Lexical, cfg),
-        id: win.id,
-    };
-    if !session.should_recommend(&rec.id, rec.confidence, confidence::HIGH) {
-        return Vec::new();
-    }
-    vec![rec]
 }
 
 /// Pick the inject shape for the chosen `recs`. Normally `cfg.inject_mode`, but a
@@ -506,6 +444,17 @@ mod tests {
         );
     }
 
+    /// The stage-1 cosine path as the hook runs it: gate in `pipeline`, then the
+    /// caller-side `finalize` (deny/confidence/dedup/cap).
+    fn select_cosine(hits: &[Hit], cfg: &Config, session: &Session) -> Vec<Rec> {
+        finalize(
+            &pipeline::cosine_passed(hits, cfg),
+            Stage::Cosine,
+            cfg,
+            session,
+        )
+    }
+
     #[test]
     fn select_threshold_and_cap() {
         let cfg = Config::default(); // min 0.30, margin 0.15, max 2
@@ -516,7 +465,7 @@ mod tests {
             hit("c", 0.84, 0.0), // within margin but over the cap
             hit("d", 0.10, 0.0), // below threshold
         ];
-        let got: Vec<String> = select(hits, &cfg, &session)
+        let got: Vec<String> = select_cosine(&hits, &cfg, &session)
             .into_iter()
             .map(|h| h.id)
             .collect();
@@ -536,7 +485,7 @@ mod tests {
             hit("b", 0.85, 0.0),
             hit("c", 0.80, 0.0),
         ];
-        let got: Vec<String> = select(hits, &cfg, &session)
+        let got: Vec<String> = select_cosine(&hits, &cfg, &session)
             .into_iter()
             .map(|h| h.id)
             .collect();
@@ -549,7 +498,7 @@ mod tests {
         let session = Session::default();
         // Both clear the 0.30 floor, but b is far below the 0.90 leader.
         let hits = vec![hit("a", 0.90, 0.0), hit("b", 0.50, 0.0)];
-        let got: Vec<String> = select(hits, &cfg, &session)
+        let got: Vec<String> = select_cosine(&hits, &cfg, &session)
             .into_iter()
             .map(|h| h.id)
             .collect();
@@ -565,7 +514,7 @@ mod tests {
         let mut session = Session::default();
         session.mark_recommended("a", 0.95);
         let hits = vec![hit("a", 0.90, 0.0), hit("b", 0.50, 0.0)];
-        assert!(select(hits, &cfg, &session).is_empty());
+        assert!(select_cosine(&hits, &cfg, &session).is_empty());
     }
 
     #[test]
@@ -576,7 +525,7 @@ mod tests {
         let mut session = Session::default();
         session.mark_recommended("a", 0.60); // earlier: medium
         let hits = vec![hit("a", 0.90, 0.0)]; // now: cosine 0.90 -> high
-        let got: Vec<String> = select(hits, &cfg, &session)
+        let got: Vec<String> = select_cosine(&hits, &cfg, &session)
             .into_iter()
             .map(|r| r.id)
             .collect();
@@ -588,7 +537,7 @@ mod tests {
         let cfg = Config::default(); // margin 0.15
         let session = Session::default();
         let hits = vec![hit("a", 0.90, 0.0), hit("b", 0.80, 0.0)];
-        let got: Vec<String> = select(hits, &cfg, &session)
+        let got: Vec<String> = select_cosine(&hits, &cfg, &session)
             .into_iter()
             .map(|h| h.id)
             .collect();
@@ -604,7 +553,7 @@ mod tests {
         let session = Session::default();
         // x is below threshold but forced with a keyword hit; y just below, no force.
         let hits = vec![hit("x", 0.1, 0.15), hit("y", 0.2, 0.0)];
-        let got: Vec<String> = select(hits, &cfg, &session)
+        let got: Vec<String> = select_cosine(&hits, &cfg, &session)
             .into_iter()
             .map(|h| h.id)
             .collect();

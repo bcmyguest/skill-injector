@@ -7,7 +7,9 @@ use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::{self, Host};
 use ski::index::{self, Index};
-use ski::{history, init, lexical, observe, paths, rank, rerank, session_start, skill};
+use ski::{
+    context, history, init, lexical, observe, paths, pipeline, rank, rerank, session_start, skill,
+};
 
 #[derive(Parser)]
 #[command(
@@ -154,47 +156,60 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
     let query = embedder
         .embed(&[prompt.to_string()], EmbedKind::Query)?
         .remove(0);
-    let hits = rank::rank_all(&query, prompt, &idx, &cfg);
-    // Captured before the match consumes `hits`: whether stage-1 has a confident
-    // lone dense winner, which suppresses the lexical fast-path (shown below).
+
+    // Build the same channel inputs the hook does for a turn-1 prompt, so `why`
+    // reproduces the live decision rather than a context-free approximation: the
+    // file-type channel from the prompt text, the ambient project channel from the
+    // working directory, and the context-enriched rerank query. There is no
+    // conversation history here, so the context-blend vector is absent — exactly the
+    // hook's first turn.
+    let file_ids = if cfg.file_boost > 0.0 {
+        context::file_ids(prompt)
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let project_ids = if cfg.project_boost > 0.0 {
+        std::env::current_dir()
+            .ok()
+            .map(|d| context::project_ids(&d.to_string_lossy()))
+            .unwrap_or_default()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let hits = rank::rank_all_ctx(&query, None, &file_ids, &project_ids, prompt, &idx, &cfg);
+    let prompt_top = hits.iter().map(|h| h.cosine).fold(0.0_f32, f32::max);
+    let rerank_query = context::rerank_query(prompt, prompt_top, &[], !file_ids.is_empty(), &cfg);
+    // Whether stage-1 has a confident lone dense winner (suppresses the lexical
+    // fast-path), for the lexical block's verdict below.
     let dense_confident = rerank::confident_winner(&hits, &cfg);
 
-    // Mirror the hook's decision so `why` (and the eval that drives it) reflects
-    // the real pipeline: stage-1 cosine, or stage-2 reranker logits when the gate
-    // fires. A `*` marks a row that would actually inject — for reranked rows that
-    // means clearing `passes` (reranker thresholds *and* stage-1 agreement), not
-    // just `rerank_min`, so a sub-floor skill the reranker pulled up shows unstarred.
-    let (rows, threshold, stage, injectable) = match rerank::is_ambiguous(&hits, &cfg)
-        .then(|| rerank::rerank(&hits, &idx, prompt, &cfg))
-        .flatten()
-    {
-        Some(reranked) => {
-            let ids: std::collections::HashSet<String> = rerank::passes(&reranked, &cfg)
-                .into_iter()
-                .map(|h| h.id)
-                .collect();
-            (
-                reranked,
-                cfg.rerank_min,
-                "rerank:turbo".to_string(),
-                Some(ids),
-            )
-        }
-        None => (
-            hits,
-            cfg.min_similarity,
-            format!("stage1:{}", idx.model),
-            None,
-        ),
-    };
+    // The exact decision the hook would make, via the shared pipeline. A `*` marks a
+    // row that would actually inject (cleared the winning stage's gate — for the
+    // reranker that means `passes`, i.e. reranker thresholds *and* stage-1 agreement,
+    // not just `rerank_min`; for the lexical fast-path, the dominant BM25 winner).
+    let plan = pipeline::decide(&hits, &idx, prompt, &rerank_query, &cfg);
+    // Star exactly what the hook would inject: gate survivors minus deny, capped at
+    // `max_skills`. (The hook also applies session dedup, which `why` has no session
+    // for — so a star is "would inject on a fresh conversation".)
+    let injectable: std::collections::HashSet<&str> = plan
+        .passed
+        .iter()
+        .filter(|h| !cfg.deny.contains(&h.id))
+        .take(cfg.max_skills)
+        .map(|h| h.id.as_str())
+        .collect();
 
-    println!("stage {stage}  threshold {threshold:.2}  prompt: {prompt:?}");
-    for h in rows.iter().take(top) {
-        let starred = match &injectable {
-            Some(ids) => ids.contains(&h.id),
-            None => h.score >= threshold,
+    println!(
+        "stage {}  threshold {:.2}  prompt: {prompt:?}",
+        pipeline::stage_label(plan.stage, &idx.model),
+        plan.threshold
+    );
+    for h in plan.rows.iter().take(top) {
+        let mark = if injectable.contains(h.id.as_str()) {
+            "*"
+        } else {
+            " "
         };
-        let mark = if starred { "*" } else { " " };
         // Stage-1 channel attribution from the single-sourced breakdown, so `why`
         // can never omit a channel the score includes (it previously dropped
         // `project`). On a reranked row `h.score` is the logit; the breakdown still
@@ -208,7 +223,7 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
         println!("{mark} {:<26} score {:.3}  ({parts})", h.name, h.score);
     }
 
-    // Lexical (BM25-over-description) channel: a dominant winner would inject
+    // Lexical (BM25-over-description) channel detail: a dominant winner injects
     // directly, skipping the reranker (unless stage-1 has a confident lone dense
     // winner). Shown as a tuning aid — the top BM25 scores and whether the dominance
     // gate fires at the active `lexical_min` / `lexical_margin`.

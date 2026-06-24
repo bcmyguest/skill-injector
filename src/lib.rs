@@ -17,6 +17,7 @@ pub mod inject;
 pub mod lexical;
 pub mod observe;
 pub mod paths;
+pub mod pipeline;
 pub mod rank;
 pub mod rerank;
 pub mod session;
