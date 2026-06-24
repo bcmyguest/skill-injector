@@ -24,8 +24,20 @@ fn write_skill(root: &std::path::Path, name: &str, desc: &str) {
     .unwrap();
 }
 
-fn temp_root() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("ski-phrase-it-{}", std::process::id()));
+// A per-test directory. The two tests in this file share one process (one PID),
+// so a PID-only name let them collide on the same path — one test's
+// `remove_dir_all` could wipe the other's tree mid-run under the parallel
+// runner. The `label` keeps the two tests apart and the nanos suffix keeps
+// successive runs apart (mirrors the helper idiom in `src/skill.rs`).
+fn temp_root(label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let d = std::env::temp_dir().join(format!(
+        "ski-phrase-it-{}-{label}-{nanos}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
@@ -55,7 +67,7 @@ fn rank(root: &std::path::Path, prompt: &str) -> Vec<rank::Hit> {
 
 #[test]
 fn trigger_phrase_lifts_its_skill_and_stays_silent_elsewhere() {
-    let root = temp_root();
+    let root = temp_root("trigger");
     // A skill whose *only* distinctive trigger is a quoted multi-word phrase.
     write_skill(
         &root,
@@ -99,7 +111,7 @@ fn trigger_phrase_lifts_its_skill_and_stays_silent_elsewhere() {
 /// new channel.
 #[test]
 fn phrase_channel_lifts_true_positive_without_lifting_false_positive() {
-    let root = temp_root();
+    let root = temp_root("ab");
     write_skill(
         &root,
         "accessibility",
