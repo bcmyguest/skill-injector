@@ -100,13 +100,27 @@ impl Session {
 
     /// Persist state, stamping `updated`. Best-effort; callers in the hot path
     /// should ignore the result so state IO can't block a prompt.
+    ///
+    /// Writes a per-process temp file then atomically renames it over the target,
+    /// so a concurrent reader (another hook/observe process sharing the
+    /// `session_id`) never observes a half-written file — a torn read used to
+    /// silently reset the session and re-arm dedup. The lost-update window — two
+    /// writers racing the load→mutate→save and one dropping the other's mark —
+    /// remains; it costs at most a missed dedup (a re-injection), never
+    /// corruption, and closing it would need an advisory lock.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut snapshot = self.clone();
         snapshot.updated = now_secs();
-        fs::write(path, serde_json::to_string_pretty(&snapshot)?)?;
+        let json = serde_json::to_string_pretty(&snapshot)?;
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), now_nanos()));
+        fs::write(&tmp, json)?;
+        if let Err(e) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -212,6 +226,15 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Nanosecond stamp, used only to make the atomic-write temp path unique per
+/// writer so two concurrent saves can't collide on the same temp file.
+fn now_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
         .unwrap_or(0)
 }
 
@@ -348,6 +371,31 @@ mod tests {
     fn missing_file_is_empty_session() {
         let s = Session::load(Path::new("/nonexistent/ski/session.json"));
         assert!(s.loaded.is_empty());
+    }
+
+    #[test]
+    fn save_then_load_roundtrips_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "ski-session-save-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        let path = dir.join("conv.json");
+        let mut s = Session::default();
+        s.mark("uv-setup", Source::Ski);
+        s.save(&path).unwrap();
+
+        let back = Session::load(&path);
+        assert_eq!(back.loaded["uv-setup"].source, Source::Ski);
+        // The temp file used by the atomic rename must not survive the write.
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .filter(|n| n != "conv.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -328,7 +328,10 @@ fn load_or_build_index(
     host: Host,
 ) -> anyhow::Result<Index> {
     let path = paths::index_path(host);
-    if let Some(idx) = Index::load(&path)? {
+    // Swallow a load error (corrupt/truncated index) and fall through to a
+    // rebuild rather than propagating — a bad index file must not brick the hook
+    // on every prompt. Mirrors the self-healing read in `session_start::reindex`.
+    if let Some(idx) = Index::load(&path).ok().flatten() {
         if idx.model == embedder.id() {
             return Ok(idx);
         }
