@@ -59,31 +59,33 @@ Status legend: **DONE** · **NEXT** · **OPEN** · **WON'T-FIX**
   both `#[test]`s in the one binary shared the path and test1's `remove_dir_all`
   wiped test2 mid-read → flaky `discover` panic under parallel run. Fixed:
   per-test label + nanos suffix (mirrors `skill.rs:378` idiom).
-- **S2 — NEXT.** `cmd_why` (main.rs:154-234) does **not** run the same math as the
-  hook: `rank_all` (no file/project/context channels) vs the hook's
-  `rank_all_ctx`. `ski why` can star a skill the hook wouldn't inject — breaks the
-  README's "Reproduce any of it." Gate logic is also re-implemented inline. Fix:
-  extract `pipeline::decide(...) -> Decision` shared by hook / why / eval. (This
-  is the deferred big item; subsumes part of S3 and S5.)
-- **S3 — OPEN (HIGH).** `hook.rs:72-269` `decide()` is a ~200-line god-function
-  (IO, filtering, init, 3 channel assemblies, 3-way stage dispatch, 2 telemetry
-  exits, inject, dedup). Only leaf helpers are testable. Decompose into named
-  stages (`load_pipeline` / `gather_context` / `run_stages` / `emit`). Pairs with
-  S2.
+- **S2 — DONE.** `cmd_why` ran `rank_all` (no file/project/context channels) and
+  reranked the bare prompt, so `ski why` could star a skill the hook wouldn't
+  inject. Extracted `src/pipeline.rs` (`decide` + `cosine_passed` + `stage_label`)
+  as the one cascade, used by hook / why / eval. `cmd_why` now builds the same
+  turn-1 inputs and renders the plan; verified end to end that its `*` set matches
+  the hook's injection per prompt on both hosts (a stale persisted index was the
+  only mismatch). Behavior-preserving; 151 tests pass.
+- **S3 — PARTIAL.** `hook::decide` shrank — the 3-way stage dispatch moved to
+  `pipeline::decide` and the three `select*` collapsed into `finalize` (see S7).
+  It is still one long function (stdin IO, init, the 3 channel assemblies, 2
+  telemetry-exit paths, inject, dedup). Remaining: lift `gather_context` and
+  `emit`/telemetry out so the orchestration is testable without a subprocess.
 - **S4 — OPEN (MED).** `history.rs:83-208` four near-identical JSONL scanners +
   a fifth in `aggregate` → the log is parsed 4-6× per `history` run. Fix: one
   `parse_events() -> Vec<Event>` pass; derive the per-session maps + aggregate
   from it (~120 lines removed).
-- **S5 — OPEN (MED).** Score formula `cos+ctx+file+project+kw+ph` written in 3
-  places; `why`'s display (main.rs:199) **and** `rerank::passes` (rerank.rs:132)
-  both **omit the `project` term**. Drift bug on any channel add. Fix:
-  `Hit::stage1_score()` + `breakdown()`, single-sourced. (Tied to S2.)
+- **S5 — DONE.** Score formula was transcribed 3× with `project` silently dropped
+  from `why`'s display and `rerank::passes`. Added `Hit::stage1_score()` +
+  `Hit::breakdown()` as the one source, routed all three through them. Including
+  `project` in the agreement gate is a no-op (it is only non-zero when
+  `cosine >= min_similarity`, already clearing the floor), so no behavior change.
 - **S6 — OPEN (MED).** `config.rs:391-473` 28 fields × 4 sites
   (`Config`/`FileConfig`/`apply`/`base`) = shotgun surgery per knob. Fix: a
   declarative `overlay!` macro or serde-flatten layer.
-- **S7 — OPEN (MED).** `hook.rs:351-401` `select` / `select_reranked` /
-  `select_lexical` repeat the same tail (deny filter → Rec map → `should_recommend`
-  → `take`). Factor a shared `finalize(...)`; callers differ only in pre-filter.
+- **S7 — DONE.** `select` / `select_reranked` / `select_lexical` collapsed into one
+  `hook::finalize(passed, stage, cfg, session)` (deny → stage confidence → dedup →
+  cap), fed by `pipeline::decide`'s gate survivors. Done as part of S2.
 - **S8 — OPEN (LOW).** `lib.rs:8-26` every module is `pub`; ~10 are internal-only.
   Tighten the genuinely-internal ones to `pub(crate)`.
 - **S9 — OPEN (LOW-MED).** `config.rs:195-323` `base()` is 128 lines, ~90 of them
@@ -147,8 +149,16 @@ Status legend: **DONE** · **NEXT** · **OPEN** · **WON'T-FIX**
 
 ---
 
-### This pass fixed
-C1, C2 (torn-read), S1, D1, D2.
+### Fixed so far
+C1, C2 (torn-read), S1, D1, D2 (first batch); then S2, S5, S7 and S3-partial
+(the `pipeline` extraction: `ski why` now reproduces the hook, score formula
+single-sourced, `select*` collapsed into `finalize`).
 
 ### Recommended next
-S2 (single-source the ranker so `why` == hook), which also unblocks S3 and S5.
+- **S3 remainder** — lift `gather_context` / `emit` out of `hook::decide` so the
+  orchestration is unit-testable.
+- **S12** — `SKI_DEBUG`-gated trace on the swallowed fail-open errors (cheap, high
+  debuggability payoff).
+- **C3** — one non-UTF8 `SKILL.md` shouldn't disable the whole library.
+- **C4** — NaN-safe ranking sort.
+- **S4 / S6** — de-duplicate the history scanners and the config overlay.
