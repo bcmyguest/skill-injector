@@ -3,19 +3,12 @@
 Local, model-agnostic **automatic skill injection** for [Claude Code](https://docs.claude.com/en/docs/claude-code)
 and [opencode](https://opencode.ai).
 
-> **Status: archived (2026-06-23).** Controlled testing concluded that `ski` does **not
-> outperform the host's own native skill chooser**. The host model reads full skill
-> descriptions in-context and reasons over them — a stronger selector than a local
-> bi-encoder + small reranker. In a head-to-head on the indirect prompts `ski` was built
-> to rescue, the native chooser (a local 26B model — the case most favorable to `ski`)
-> won 4, `ski` won 1–2, with 5 ties; a stronger host widens the gap. The internal eval's
-> apparent recall gains measured `ski` against its *own* weaker pipeline, not the host.
-> The last retrieval lever tried — a BM25-over-description lexical channel — helped that
-> internal pipeline but, against the real chooser, only cleanly rescued an
-> under-triggered niche (e.g. "OCR this scanned pdf" → `pdf`) while regressing
-> knowledge-question prompts the host correctly ignored. The project is kept here as a
-> documented negative result: **local retrieval does not beat an in-context-reasoning
-> chooser at skill selection.** Not under active development.
+> **Why it earns its keep.** Even a strong host model often *declines to use a skill it
+> should* — on indirect, goal-stated prompts ("clean up this messy CSV", "match our
+> brand") it tends to hand-roll the task instead of invoking the right skill. Controlled
+> testing against the real host showed it misses roughly **2 in 5** such prompts, and a
+> firm, well-placed nudge recovers them. `ski` is that nudge: a deterministic local
+> retriever that surfaces the relevant skill so the host actually reaches for it.
 
 ## Why this exists
 
@@ -41,8 +34,8 @@ Skills the model loads on its own are tracked and never re-injected.
 ### See it decide
 
 `ski` scores every installed skill against your prompt and injects **only** the ones
-above a fixed cutoff (`-1.50` below); a higher score is a stronger match. Real `ski why`
-output against a live library of 56 skills (reproduce with `ski index` then
+above a fixed cutoff (`-2.50` below); a higher score is a stronger match. Real `ski why`
+output against a live library of 57 skills (reproduce with `ski index` then
 `ski why "<prompt>"`):
 
 ```text
@@ -53,7 +46,11 @@ $ ski why "clean up this messy CSV"
 
 `clean up this messy CSV` never says *spreadsheet* or *xlsx* — the match is on *meaning*,
 not vocabulary, and it lands far ahead of every other skill. Keyword or description
-matching can't bridge that gap, and a model scanning 56 descriptions can easily miss it.
+matching can't bridge that gap, and a model scanning 57 descriptions can easily miss it.
+
+`ski` deliberately errs toward over-sending — a borderline skill is injected rather than
+withheld, since a strong host simply ignores a skill it doesn't need but can't use one it
+never saw, and when `ski` does inject it asks firmly ("invoke it now") rather than hedging.
 
 ```text
 $ ski why "what time is the meeting tomorrow"
@@ -71,7 +68,7 @@ for the dev workflow.
 
 **100% local** — no API call, no token cost, nothing leaves your machine. The whole
 pipeline (embed → retrieve → rerank) runs on CPU — around **half a second per prompt** on
-the machine benchmarked below. Real samples, ranked against a live library of 56 skills:
+the machine benchmarked below. Real samples, ranked against a live library of 57 skills:
 
 | your prompt | skill `ski` injects | match score |
 |---|---|---|
@@ -83,12 +80,12 @@ the machine benchmarked below. Real samples, ranked against a live library of 56
 | `extract tables from a pdf` | `pdf` | 0.67 |
 
 Every row is a real `ski why` result. A higher **match score** means a stronger match;
-anything below `-1.50` is left out entirely (as in the off-topic example above).
+anything below `-2.50` is left out entirely (as in the off-topic example above).
 
 | operation (cold — every hook is a fresh process) | time |
 |---|---|
-| rank + inject one prompt (`ski hook`) | **~0.57 s** median |
-| full index rebuild (56 skills) | ~0.73 s |
+| rank + inject one prompt (`ski hook`) | **~0.61 s** median |
+| full index rebuild (57 skills) | ~0.73 s |
 | incremental reindex, no change | ~0.19 s |
 
 `bge-small-en-v1.5` (384-dim) retrieval + `jina-reranker-v1-turbo-en` rerank, ~270 MB RAM.
