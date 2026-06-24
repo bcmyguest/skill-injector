@@ -3,40 +3,34 @@
 Local, model-agnostic **automatic skill injection** for [Claude Code](https://docs.claude.com/en/docs/claude-code)
 and [opencode](https://opencode.ai).
 
-> **Why it earns its keep.** Even a strong host model often *declines to use a skill it
-> should* — on indirect, goal-stated prompts ("clean up this messy CSV", "match our
-> brand") it tends to hand-roll the task instead of invoking the right skill. Controlled
-> testing against the real host showed it misses roughly **2 in 5** such prompts, and a
-> firm, well-placed nudge recovers them. `ski` is that nudge: a deterministic local
-> retriever that surfaces the relevant skill so the host actually reaches for it.
+> A strong model often **won't use a skill it should** — on indirect prompts it
+> hand-rolls the task instead of invoking the skill built for it. `ski` is a local,
+> deterministic nudge that surfaces the right skill so the model actually reaches for it.
 
 ## Why this exists
 
-Agent skill systems advertise every skill's description to the model and trust it to
-notice the relevant one and invoke it. In practice that leaks:
+Skill systems dump every skill's description into the model's context and hope it picks
+the right one. That works until it doesn't:
 
-- **Missed triggers.** When a skill's description shares no vocabulary with your prompt,
-  the model overlooks it — the match is *semantic*, not lexical. The more skills you
-  install, the more often the right one hides in the crowd.
-- **Model-dependent.** "Pick the skill from a wall of descriptions" is something even
-  frontier models do unevenly, and smaller or local models do worse. Which skill fires
-  drifts with whatever model is driving the session.
-- **Always-on cost.** Every description sits in the context window every turn, relevant
-  or not.
+- **The model skips skills it should use.** On indirect prompts — "clean up this messy
+  CSV", "match our brand" — a capable host often just does the task by hand instead of
+  reaching for the skill built for it.
+- **It gets worse with more skills, and worse with weaker models.** Picking one skill out
+  of a wall of descriptions is hard, and which one fires drifts with whatever model is
+  driving the session.
+- **Every description costs context, every turn** — relevant or not.
 
-`ski` replaces the guesswork with a deterministic local retriever: it embeds your prompt
-on CPU, ranks it against your skill descriptions, and injects the matched skill **only
-when one is genuinely relevant** — the same result no matter which model runs, with no
-API call and nothing leaving your machine. The model still chooses which *files* a skill
-points to; `ski` only guarantees the right skill is **in the room** when it matters.
-Skills the model loads on its own are tracked and never re-injected.
+`ski` does the picking for you. It embeds your prompt on CPU, ranks it against your skill
+descriptions, and injects the matching skill **only when one actually fits** — same
+result on any model, no API call, nothing leaving your machine. The model still decides
+what to *do* with the skill; `ski` just makes sure the right one is in the room. Skills
+the model finds on its own are tracked and never injected twice.
 
 ### See it decide
 
 `ski` scores every installed skill against your prompt and injects **only** the ones
 above a fixed cutoff (`-2.50` below); a higher score is a stronger match. Real `ski why`
-output against a live library of 57 skills (reproduce with `ski index` then
-`ski why "<prompt>"`):
+output against a live library of 57 skills:
 
 ```text
 $ ski why "clean up this messy CSV"
@@ -64,11 +58,25 @@ This repo is a single Rust binary (`ski`) plus the thin host adapters that drive
 packaged as a one-plugin Claude Code marketplace. See [DEVELOPING.md](./DEVELOPING.md)
 for the dev workflow.
 
-## Benchmarks
+## Speed and examples
 
-**100% local** — no API call, no token cost, nothing leaves your machine. The whole
-pipeline (embed → retrieve → rerank) runs on CPU — around **half a second per prompt** on
-the machine benchmarked below. Real samples, ranked against a live library of 57 skills:
+**Fast and entirely local** — no API call, no token cost, nothing leaves your machine.
+The whole pipeline (embed → retrieve → rerank) runs on CPU in about **half a second per
+prompt**:
+
+| operation (cold — every hook is a fresh process) | time |
+|---|---|
+| rank + inject one prompt (`ski hook`) | **~0.61 s** median |
+| full index rebuild (57 skills) | ~0.73 s |
+| incremental reindex, no change | ~0.19 s |
+
+`bge-small-en-v1.5` (384-dim) retrieval + `jina-reranker-v1-turbo-en` rerank, ~270 MB RAM.
+Measured CPU-only on an AMD Ryzen AI MAX+ 395 — cold runs with model load included,
+not warm microbenchmarks.
+
+**It matches on meaning, not keywords.** Every row is a real `ski why` result against a
+live library of 57 skills; a higher match score is a stronger match, and anything below
+`-2.50` is left out entirely (as in the off-topic example above):
 
 | your prompt | skill `ski` injects | match score |
 |---|---|---|
@@ -79,58 +87,43 @@ the machine benchmarked below. Real samples, ranked against a live library of 57
 | `write a Word doc with a table of contents` | `docx` | 0.12 |
 | `extract tables from a pdf` | `pdf` | 0.67 |
 
-Every row is a real `ski why` result. A higher **match score** means a stronger match;
-anything below `-2.50` is left out entirely (as in the off-topic example above).
+Reproduce any of it with `ski index` then `ski why "<your prompt>"`.
 
-| operation (cold — every hook is a fresh process) | time |
-|---|---|
-| rank + inject one prompt (`ski hook`) | **~0.61 s** median |
-| full index rebuild (57 skills) | ~0.73 s |
-| incremental reindex, no change | ~0.19 s |
+## Install
 
-`bge-small-en-v1.5` (384-dim) retrieval + `jina-reranker-v1-turbo-en` rerank, ~270 MB RAM.
-Measured CPU-only on an AMD Ryzen AI MAX+ 395 — cold runs with model load included,
-not warm microbenchmarks. Reproduce with `ski index` then `ski why "<your prompt>"`.
+One command installs the prebuilt binary into `~/.local/bin` (Linux x86_64) and wires
+**every host it finds on disk** — Claude Code *and* opencode:
 
-## Install (Claude Code)
+```sh
+curl -fsSL https://raw.githubusercontent.com/bcmyguest/skill-injector/main/scripts/install.sh | sh
+```
 
-The plugin is hooks-only and needs the `ski` binary on disk.
+It auto-detects hosts (`~/.claude` → Claude hooks in `settings.json`; `~/.config/opencode`
+→ the opencode plugin). Pin one with `SKI_HOST=claude|opencode|both|none`. The host wiring
+is additive and idempotent — re-running is safe, and any existing Claude `settings.json`
+is backed up to `settings.json.bak` first.
 
-1. **Get the binary.** Easiest — install the latest prebuilt release into
-   `~/.local/bin` (Linux x86_64):
+`.deb` / `.rpm` packages are on the [Releases](https://github.com/bcmyguest/skill-injector/releases)
+page. To build from source instead (default build = real embedder + reranker, downloads
+the model once then runs offline), then wire the host yourself:
 
-   ```sh
-   curl -fsSL https://raw.githubusercontent.com/bcmyguest/skill-injector/main/scripts/install.sh | sh
-   ```
+```sh
+cargo install --path .            # -> ~/.cargo/bin/ski (real embedder + reranker)
+# ...or the offline bag-of-words build, no deps or model download:
+# cargo install --path . --no-default-features
+ski init -g claude               # then wire the host (or: opencode)
+```
 
-   `.deb` / `.rpm` packages are on the [Releases](https://github.com/bcmyguest/skill-injector/releases)
-   page too. Or build from source — default build = real embedder + reranker
-   (downloads the model once, then offline):
+**Prefer the Claude marketplace?** Skip the host-wiring step and enable the plugin instead:
 
-   ```sh
-   cargo install --path .            # -> ~/.cargo/bin/ski
-   ```
+```sh
+/plugin marketplace add bcmyguest/skill-injector   # or a local path to this repo
+/plugin install skill-inject@skill-inject
+```
 
-   Or the offline bag-of-words build (no deps, no model download):
-
-   ```sh
-   cargo install --path . --no-default-features
-   ```
-
-2. **Enable the plugin** from this marketplace:
-
-   ```sh
-   /plugin marketplace add bcmyguest/skill-injector   # or a local path to this repo
-   /plugin install skill-inject@skill-inject
-   ```
-
-   **Can't use the marketplace?** `ski init -g claude` merges the same three hooks
-   straight into `~/.claude/settings.json` (backing up any existing file to
-   `settings.json.bak` first). It's additive and idempotent — it won't touch unrelated
-   settings or double-wire a hook already present.
-
-`hooks/hooks.json` wires three hooks through `scripts/ski-bootstrap.sh`, which resolves
-`ski` from `PATH`, then `~/.local/bin`, then `~/.cargo/bin`:
+However you install on Claude, three hooks get wired (`hooks/hooks.json` runs them through
+`scripts/ski-bootstrap.sh`, which resolves `ski` from `PATH`, then `~/.local/bin`, then
+`~/.cargo/bin`):
 
 | hook | matcher | command |
 |---|---|---|
@@ -141,7 +134,8 @@ The plugin is hooks-only and needs the `ski` binary on disk.
 If `ski` isn't found, the bootstrap exits 0 with no output — a missing build never blocks
 a prompt. Set `SKI_DEBUG=1` for an install hint on stderr.
 
-For **opencode**, see [opencode/README.md](./opencode/README.md).
+For opencode specifics (skill roots, the plugin event map), see
+[opencode/README.md](./opencode/README.md).
 
 ## Usage
 

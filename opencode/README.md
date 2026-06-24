@@ -28,31 +28,19 @@ the same order as the Claude adapter's `ski-bootstrap.sh`.
 
 ## Install
 
-1. Build the binary (the default build ships the bge embedder + reranker; add
-   `--no-default-features` for the offline bag-of-words lane):
+The repo's `scripts/install.sh` (the `curl … | sh` one-liner in the
+[top-level README](../README.md#install)) installs the binary and wires opencode
+automatically when `~/.config/opencode` is present.
 
-   ```bash
-   cargo install --path <repo>
-   ```
+To set up opencode from an already-installed binary, run:
 
-2. Make opencode load the plugin. Either drop the file into opencode's
-   auto-loaded plugin dir:
+```bash
+ski init -g opencode
+```
 
-   ```bash
-   mkdir -p ~/.config/opencode/plugin
-   cp <repo>/opencode/ski.ts ~/.config/opencode/plugin/ski.ts
-   ```
-
-   …or reference it from `~/.config/opencode/opencode.json`:
-
-   ```json
-   {
-     "plugin": ["<repo>/opencode/ski.ts"]
-   }
-   ```
-
-`ski init -g opencode` does this for you — it writes the bundled plugin straight to
-`~/.config/opencode/plugin/ski.ts` (the first option above), no manual copy needed.
+It writes the bundled plugin to `~/.config/opencode/plugin/ski.ts`, where opencode
+auto-loads it. Building the binary from source first: `cargo install --path <repo>`
+(add `--no-default-features` for the offline bag-of-words lane).
 
 ## Skill roots
 
