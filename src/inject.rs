@@ -70,21 +70,26 @@ pub fn build(
 }
 
 /// One directive line: a distinctive `SkillRecommendation(name)` token, the
-/// description, then a verb scaled by confidence band (and harder under
-/// [`Strength::Hard`] for weak local choosers).
+/// description, then an imperative verb (hardest under [`Strength::Hard`] for
+/// weak local choosers).
 ///
 /// The raw confidence is deliberately **not** shown to the model: every line
 /// here has already cleared a precision gate, so a bare decimal (`0.36`) only
-/// invites the model to anchor on it and discount a genuine match. The band —
-/// expressed in the verb's forcefulness — is the honest, right-grained signal;
-/// the exact value still rides into telemetry via [`Rec::confidence`].
+/// invites the model to anchor on it and discount a genuine match. The exact
+/// value still rides into telemetry via [`Rec::confidence`] for calibration.
+///
+/// The verb does **not** soften with low confidence. A controlled probe against
+/// the real host (see `[[ski-host-recall-gap]]`) showed that timid phrasing
+/// ("consider invoking it") is ignored 0/3 *even when the skill is the right
+/// one*, while "invoke it now, before you respond." is acted on 2/3..3/3 — and a
+/// strong host ignores false injects regardless of how firmly they're phrased
+/// (3/3), so there is no precision benefit to hedging. If ski cleared the floor
+/// and injected, it asks firmly.
 fn directive_block(entry: &Entry, strength: Strength, confidence: f32) -> String {
     let verb = match (strength, confidence::band(confidence)) {
         (Strength::Hard, Band::High) => "you MUST invoke it before responding.",
-        (Strength::Hard, _) => "invoke it before responding if it fits.",
-        (_, Band::High) => "invoke it now, before you respond.",
-        (_, Band::Medium) => "invoke it if it fits.",
-        (_, Band::Low) => "consider invoking it.",
+        (Strength::Hard, _) => "you should invoke it before responding.",
+        (_, _) => "invoke it now, before you respond.",
     };
     format!(
         "- SkillRecommendation(`{}`): {} — {}",
@@ -180,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn directive_verb_scales_with_band() {
+    fn directive_soft_is_firm_regardless_of_band() {
         let idx = index_of(vec![entry("a", "alpha", "/p/SKILL.md")]);
         let soft = |c| {
             build(
@@ -192,9 +197,35 @@ mod tests {
             )
             .0
         };
-        assert!(soft(0.95).contains("invoke it now, before you respond."));
-        assert!(soft(0.70).contains("invoke it if it fits."));
-        assert!(soft(0.40).contains("consider invoking it."));
+        // Every injected directive asks firmly: a skill that cleared the floor is
+        // worth invoking, and timid verbs ("consider…") are ignored by a strong
+        // host even when the skill is the right one. See `[[ski-host-recall-gap]]`.
+        for c in [0.95_f32, 0.70, 0.40] {
+            let line = soft(c);
+            assert!(
+                line.contains("invoke it now, before you respond."),
+                "c={c}: {line}"
+            );
+            assert!(!line.contains("consider"), "c={c}: {line}");
+        }
+    }
+
+    #[test]
+    fn directive_hard_scales_with_high_band() {
+        let idx = index_of(vec![entry("a", "alpha", "/p/SKILL.md")]);
+        let hard = |c| {
+            build(
+                &[rec("a", c)],
+                &idx,
+                InjectMode::Directive,
+                Strength::Hard,
+                6000,
+            )
+            .0
+        };
+        assert!(hard(0.95).contains("you MUST invoke it before responding."));
+        assert!(!hard(0.40).contains("MUST"));
+        assert!(hard(0.40).contains("you should invoke it before responding."));
     }
 
     #[test]

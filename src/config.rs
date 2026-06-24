@@ -266,11 +266,30 @@ impl Config {
             // resurrect a skill stage-1 judged irrelevant. That cut false injects a
             // further ~67% (3 -> 1 on the 52-negative realistic corpus) at no extra
             // compute, holding recall at 95%. See `rerank::AGREEMENT_SLACK`, `examples/eval`.
+            //
+            // 2026-06-23 REVERSAL — floor restored to -2.5. The precision tuning above
+            // optimised the wrong objective. It rested on live telemetry showing the
+            // 0.18-0.24 band was "never acted on" — but those injects were *also*
+            // phrased timidly ("consider invoking it", the Low confidence-band verb in
+            // `inject::directive_block`), so the signal conflated *wrong skill* with
+            // *right skill, timid verb*. A controlled probe against the real host
+            // (`claude -p`, see `[[ski-host-recall-gap]]`) separated them: the strong
+            // host hand-rolls instead of invoking on indirect-task prompts (5/12 miss,
+            // every miss a Bash hand-roll), and the SAME right skill is ignored 0/3
+            // when phrased "consider…" but invoked 2/3..3/3 when phrased "invoke it
+            // now, before you respond." The two over-tunes (high floor + timid verb)
+            // interacted: lowering the floor admits the indirect matches, the firm verb
+            // (now applied to every inject, see `inject.rs`) makes the host act on them.
+            // FP cost stays low because a strong host *ignores* false injects even when
+            // phrased firmly (3/3 in the probe) — so on a strong host ski's job is
+            // RECALL of host-misses, where false positives are nearly free, not the
+            // precision the old eval rewarded. -2.5 recovers docx/brand/xlsx misses;
+            // pdf/pptx remain a small-model retrieval ceiling no floor can fix.
             recall_floor: 0.50,
             high_conf: 2.0,
             clear_gap: 0.12,
             rerank_top_k: 12,
-            rerank_min: -1.1,
+            rerank_min: -2.5,
             rerank_margin: 2.0,
             // Body-escalate only a lone, cross-encoder-confirmed near-certain match
             // (sigmoid(2.45) ~= 0.92). High enough that a stage-1 cosine hit — whose

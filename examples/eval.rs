@@ -17,12 +17,30 @@
 //! Labels: `<expected-skill-id>\t<kind>\t<prompt>`, `(none)` expects no injection.
 //! `borderline` rows are reported but excluded from the headline FP/recall (they
 //! are observe-only by design).
+//!
+//! **Headline metric — `host-value`, not raw FP count.** ski's job on a strong
+//! host is to recover skills the host would otherwise *not* invoke (it hand-rolls
+//! instead). A controlled probe (`[[ski-host-recall-gap]]`) showed the host
+//! ignores false injects even when phrased firmly (3/3), so a false inject costs
+//! almost nothing, while a recall miss costs the user a worse hand-rolled
+//! artifact. Tuning to minimise FP *count* (the old objective) therefore traded
+//! away the recall that is the entire point. The `host-value` line scores
+//! `recall_rate - FP_HARM * fp_rate` with `FP_HARM` small ([`FP_HARM`]): optimise
+//! THIS, not FP count. Raw recall and FP rate are still printed for diagnosis.
 
 use ski::config::Config;
 use ski::embed::{self, EmbedKind};
 use ski::hook::Host;
 use ski::rank::Hit;
 use ski::{context, index, lexical, rank, rerank, skill};
+
+/// Per-false-inject harm, relative to a recall miss costing 1.0, used by the
+/// `host-value` headline. A strong host ignores false injects even when phrased
+/// firmly (probe: 3/3), so their real harm is near zero; the small non-zero value
+/// keeps mild pressure against flooding context with noise (and covers weak-host
+/// setups, where a false directive can actually mislead). Recall misses, by
+/// contrast, cost a full unit — the user gets a worse hand-rolled artifact.
+const FP_HARM: f32 = 0.15;
 
 struct Case {
     want: String, // "(none)" for a negative
@@ -325,6 +343,24 @@ fn main() -> anyhow::Result<()> {
     println!(
         "negatives {n_neg}: false-inject {fp}/{n_neg} ({:.0}%)   clean {tn}",
         pct(fp, n_neg)
+    );
+    // Headline: recall recovered, net of discounted FP harm. Optimise this — not
+    // FP count — because a strong host filters false injects (see module docs).
+    let recall_rate = if n_pos == 0 {
+        0.0
+    } else {
+        tp as f32 / n_pos as f32
+    };
+    let fp_rate = if n_neg == 0 {
+        0.0
+    } else {
+        fp as f32 / n_neg as f32
+    };
+    println!(
+        "host-value {:.0}%  (= recall {:.0}% - {FP_HARM} * fp {:.0}%; FP discounted: a strong host ignores false injects)",
+        100.0 * (recall_rate - FP_HARM * fp_rate),
+        100.0 * recall_rate,
+        100.0 * fp_rate,
     );
     println!(
         "stage-1 (pre-rerank, k={}): recall@k {recall_at_k}/{n_pos} ({:.0}%)   top-1 {stage1_top1}/{n_pos} ({:.0}%)",
