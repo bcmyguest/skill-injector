@@ -103,6 +103,11 @@ It auto-detects hosts (`~/.claude` → Claude hooks in `settings.json`; `~/.conf
 is additive and idempotent — re-running is safe, and any existing Claude `settings.json`
 is backed up to `settings.json.bak` first.
 
+On its **first run** the prebuilt binary downloads its embedder + reranker weights
+(~275 MB, once) to `~/.config/ski/models`; that first prompt blocks while the download
+happens, and every run after is fully offline. (The `--no-default-features` build skips
+this — it uses the bundled bag-of-words embedder and never touches the network.)
+
 `.deb` / `.rpm` packages are on the [Releases](https://github.com/bcmyguest/skill-injector/releases)
 page. To build from source instead (default build = real embedder + reranker, downloads
 the model once then runs offline), then wire the host yourself:
@@ -181,7 +186,7 @@ char_budget = 6000          # max total injected characters
 
 # Reranker gate — JINA cross-encoder logits, where ~0 is the relevant/irrelevant
 # boundary. Raise toward 0 to inject less; lower to inject more.
-rerank_min = -1.5
+rerank_min = -2.5
 
 # Opt-in JSONL telemetry (recommend/use events) for `ski history`; off by default.
 # Equivalent to setting the SKI_TELEMETRY env var.
