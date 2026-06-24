@@ -195,10 +195,17 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
             None => h.score >= threshold,
         };
         let mark = if starred { "*" } else { " " };
-        println!(
-            "{mark} {:<26} score {:.3}  (cos {:.3} + ctx {:.3} + file {:.3} + kw {:.3} + ph {:.3})",
-            h.name, h.score, h.cosine, h.context, h.file, h.keyword, h.phrase
-        );
+        // Stage-1 channel attribution from the single-sourced breakdown, so `why`
+        // can never omit a channel the score includes (it previously dropped
+        // `project`). On a reranked row `h.score` is the logit; the breakdown still
+        // shows the preserved stage-1 channels behind it.
+        let parts = h
+            .breakdown()
+            .iter()
+            .map(|(label, v)| format!("{label} {v:.3}"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        println!("{mark} {:<26} score {:.3}  ({parts})", h.name, h.score);
     }
 
     // Lexical (BM25-over-description) channel: a dominant winner would inject

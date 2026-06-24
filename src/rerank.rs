@@ -110,26 +110,28 @@ pub fn rerank(hits: &[Hit], idx: &Index, prompt: &str, cfg: &Config) -> Option<V
 /// it already is). The caller still applies deny/session/cap.
 ///
 /// **Stage-1 agreement.** Before the reranker thresholds, a candidate must have a
-/// bi-encoder score (the preserved stage-1 `cosine + context + file + keyword +
-/// phrase`; [`rerank`] only overwrites `score` with the logit) within [`AGREEMENT_SLACK`] of
-/// stage-1's own injection floor (`min_similarity`). The phrase term is included on
-/// purpose: a confident multi-token trigger match is exactly the "stage-1 judged
-/// relevant" signal this gate looks for, so it may carry an otherwise sub-floor
-/// cosine through. The context term rides along for the same reason — a vague prompt
-/// the conversation made relevant is a stage-1 "relevant" signal too. The
-/// cross-encoder's job is to reorder and confirm the *retrieved* relevant set, not
-/// to resurrect a skill stage-1 judged irrelevant. Without this gate a prompt with no real match — "implement the
-/// builder pattern in Java", "RSA key generation from scratch" — lets the reranker
-/// pull a sub-floor skill to the top and inject noise; the logits there interleave
-/// with genuine weak matches (so no `rerank_min` value separates them), but their
-/// stage-1 scores sit lower (~0.57-0.59 vs ~0.63 for borderline real matches).
+/// bi-encoder score (the preserved stage-1 [`Hit::stage1_score`]; [`rerank`] only
+/// overwrites `score` with the logit) within [`AGREEMENT_SLACK`] of stage-1's own
+/// injection floor (`min_similarity`). Every channel counts: the phrase term is
+/// included on purpose — a confident multi-token trigger match is exactly the
+/// "stage-1 judged relevant" signal this gate looks for, so it may carry an
+/// otherwise sub-floor cosine through; the context term rides along for the same
+/// reason. (The project term is in the sum too but can never tip this gate on its
+/// own: it is only non-zero when `cosine >= min_similarity`, which already clears
+/// the floor.) The cross-encoder's job is to reorder and confirm the *retrieved*
+/// relevant set, not to resurrect a skill stage-1 judged irrelevant. Without this
+/// gate a prompt with no real match — "implement the builder pattern in Java", "RSA
+/// key generation from scratch" — lets the reranker pull a sub-floor skill to the
+/// top and inject noise; the logits there interleave with genuine weak matches (so
+/// no `rerank_min` value separates them), but their stage-1 scores sit lower
+/// (~0.57-0.59 vs ~0.63 for borderline real matches).
 pub fn passes(reranked: &[Hit], cfg: &Config) -> Vec<Hit> {
     let floor = cfg.min_similarity - AGREEMENT_SLACK;
     // Keep only candidates stage-1 also rated relevant; the best *eligible* logit
     // then anchors the relative margin (a sub-floor leader can't drag peers in).
     let eligible: Vec<&Hit> = reranked
         .iter()
-        .filter(|h| h.cosine + h.context + h.file + h.keyword + h.phrase >= floor)
+        .filter(|h| h.stage1_score() >= floor)
         .collect();
     let best = eligible
         .first()

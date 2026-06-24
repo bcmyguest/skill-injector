@@ -35,6 +35,29 @@ pub struct Hit {
     pub score: f32,
 }
 
+impl Hit {
+    /// The stage-1 hybrid score: the sum of every channel. The single source for
+    /// the `score` field, the reranker's stage-1 agreement gate
+    /// ([`crate::rerank::passes`]), and `ski why`'s breakdown display — so the
+    /// channel set can never drift apart across the three (it previously did: two
+    /// call sites silently omitted `project`).
+    pub fn stage1_score(&self) -> f32 {
+        self.cosine + self.context + self.file + self.project + self.keyword + self.phrase
+    }
+
+    /// The per-channel contributions, in summation order, for attribution display.
+    pub fn breakdown(&self) -> [(&'static str, f32); 6] {
+        [
+            ("cos", self.cosine),
+            ("ctx", self.context),
+            ("file", self.file),
+            ("project", self.project),
+            ("kw", self.keyword),
+            ("ph", self.phrase),
+        ]
+    }
+}
+
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
     for (x, y) in a.iter().zip(b.iter()) {
@@ -206,7 +229,7 @@ pub fn rank_all_ctx(
             };
             let keyword = keyword_score(prompt, &e.keywords, cfg.keyword_boost);
             let phrase = phrase_score(prompt, &e.trigger_phrases, cfg.phrase_boost);
-            Hit {
+            let mut hit = Hit {
                 id: e.id.clone(),
                 name: e.name.clone(),
                 cosine,
@@ -215,8 +238,10 @@ pub fn rank_all_ctx(
                 project,
                 keyword,
                 phrase,
-                score: cosine + context + file + project + keyword + phrase,
-            }
+                score: 0.0,
+            };
+            hit.score = hit.stage1_score();
+            hit
         })
         .collect();
     hits.sort_by(|a, b| {
