@@ -7,6 +7,8 @@
 # Env knobs:
 #   SKI_VERSION   release tag to install (e.g. v0.1.0). Default: latest release.
 #   SKI_BIN_DIR   install dir. Default: $HOME/.local/bin
+#   SKI_HOST      which host to wire after install: claude | opencode | both |
+#                 none. Default: auto — wire every host detected on disk.
 #
 # Linux x86_64 only — that is the single platform the release pipeline builds.
 # The default binary embeds the ONNX runtime statically; the bge model and
@@ -65,9 +67,39 @@ tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$BIN_DIR"
 install -m 755 "$tmp/ski" "$BIN_DIR/ski"
 echo "install.sh: installed $BIN_DIR/ski"
-"$BIN_DIR/ski" --version 2>/dev/null || true
+SKI="$BIN_DIR/ski"
+"$SKI" --version 2>/dev/null || true
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
   *) echo "install.sh: NOTE add $BIN_DIR to PATH (or rely on ski-bootstrap.sh, which already checks it)" ;;
+esac
+
+# --- wire host adapters ----------------------------------------------------
+# Binary alone does nothing; it has to be wired into a host. `ski init -g claude`
+# merges the three hooks into ~/.claude/settings.json (the marketplace-free path);
+# `ski init -g opencode` drops the bundled plugin into ~/.config/opencode/plugin.
+# Both are additive and idempotent — safe to re-run.
+wire_claude()   { "$SKI" init -g claude   || echo "install.sh: 'ski init -g claude' failed — wire it manually" >&2; }
+wire_opencode() { "$SKI" init -g opencode || echo "install.sh: 'ski init -g opencode' failed — wire it manually" >&2; }
+
+case "${SKI_HOST:-auto}" in
+  none)
+    echo "install.sh: SKI_HOST=none — skipping host wiring (run 'ski init -g <host>' yourself)"
+    ;;
+  claude)   wire_claude ;;
+  opencode) wire_opencode ;;
+  both)
+    wire_claude
+    wire_opencode
+    ;;
+  auto)
+    wired=0
+    if [ -d "$HOME/.claude" ]; then wire_claude; wired=1; fi
+    if [ -d "$HOME/.config/opencode" ]; then wire_opencode; wired=1; fi
+    if [ "$wired" = 0 ]; then
+      echo "install.sh: no host found on disk — run 'ski init -g claude' or 'ski init -g opencode' to wire one" >&2
+    fi
+    ;;
+  *) err "unknown SKI_HOST '${SKI_HOST}' (use: claude | opencode | both | none)" ;;
 esac
