@@ -120,7 +120,11 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     }
 }
 
-/// Parse a single `SKILL.md`. Returns `None` if it lacks a usable frontmatter.
+/// Parse a single `SKILL.md`. Returns `None` when the file yields no usable
+/// skill for *any* reason — unreadable file as well as missing/placeholder
+/// frontmatter — so a caller holding a possibly-stale path (e.g. the reranker's
+/// doc-text read) degrades gracefully. Use [`discover_all`] when the skip
+/// *reason* matters; the `Result` wrapper is kept for signature compatibility.
 pub fn parse_file(path: &Path) -> anyhow::Result<Option<Skill>> {
     Ok(parse_skill(path).ok())
 }
