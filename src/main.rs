@@ -36,6 +36,7 @@ enum Cmd {
     /// Rank skills against a prompt and print scores (tuning aid).
     Why {
         /// The prompt (all trailing words are joined).
+        #[arg(required = true)]
         prompt: Vec<String>,
         /// How many ranked skills to show.
         #[arg(long, default_value_t = 10)]
