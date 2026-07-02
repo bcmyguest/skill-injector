@@ -53,6 +53,7 @@ fn init_opencode() -> Result<()> {
     let dest = dir.join("ski.ts");
     fs::write(&dest, OPENCODE_PLUGIN).with_context(|| format!("writing {}", dest.display()))?;
     println!("installed opencode plugin -> {}", dest.display());
+    print_next_steps("opencode");
     Ok(())
 }
 
@@ -119,7 +120,20 @@ fn init_claude() -> Result<()> {
     } else {
         println!("wired {added} ski hook(s) into {}", path.display());
     }
+    print_next_steps("claude");
     Ok(())
+}
+
+/// Post-install pointers. The two things every new install trips over: the
+/// first ranked prompt otherwise blocks on the one-time model download, and a
+/// zero-skill library silently injects nothing.
+fn print_next_steps(host: &str) {
+    println!("next steps:");
+    println!(
+        "  ski index --host {host}    # pre-download the embedding models (one-time, ~275 MB)\n\
+         \x20                            and build the index — otherwise your first prompt blocks on it"
+    );
+    println!("  ski why \"set up a python project\"    # verify skills are discovered and ranked");
 }
 
 /// Whether a settings.json hook group already runs `ski <sub> --host claude` —

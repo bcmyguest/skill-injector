@@ -9,6 +9,8 @@
 #   SKI_BIN_DIR   install dir. Default: $HOME/.local/bin
 #   SKI_HOST      which host to wire after install: claude | opencode | both |
 #                 none. Default: auto — wire every host detected on disk.
+#   SKI_PREWARM   set to 0 to skip the post-wire model download + index build
+#                 (it will then happen on first use instead).
 #
 # Linux x86_64 only — that is the single platform the release pipeline builds.
 # The default binary embeds the ONNX runtime statically; the bge model and
@@ -83,22 +85,42 @@ esac
 wire_claude()   { "$SKI" init -g claude   || echo "install.sh: 'ski init -g claude' failed — wire it manually" >&2; }
 wire_opencode() { "$SKI" init -g opencode || echo "install.sh: 'ski init -g opencode' failed — wire it manually" >&2; }
 
+# Pre-warm one host's model cache + index NOW, so the one-time model download
+# (~275 MB to ~/.config/ski/models) happens here — visibly, with the user
+# watching an installer — instead of silently stalling their first prompt (or
+# being killed by the host's hook timeout and re-attempted every prompt).
+# Best-effort: an offline install still succeeds, injection self-heals later.
+# Skippable with SKI_PREWARM=0. Both hosts share the model cache, so warming is
+# once; the second host only needs its own (cheap) index build.
+prewarm() {
+  [ "${SKI_PREWARM:-1}" = 0 ] && return 0
+  echo "install.sh: pre-downloading embedding models + building the skill index (one-time, ~275 MB)..."
+  for h in "$@"; do
+    "$SKI" index --host "$h" || \
+      echo "install.sh: warning: pre-warm for '$h' failed (offline?) — the download will retry on first use" >&2
+  done
+}
+
 case "${SKI_HOST:-auto}" in
   none)
     echo "install.sh: SKI_HOST=none — skipping host wiring (run 'ski init -g <host>' yourself)"
     ;;
-  claude)   wire_claude ;;
-  opencode) wire_opencode ;;
+  claude)   wire_claude;   prewarm claude ;;
+  opencode) wire_opencode; prewarm opencode ;;
   both)
     wire_claude
     wire_opencode
+    prewarm claude opencode
     ;;
   auto)
-    wired=0
-    if [ -d "$HOME/.claude" ]; then wire_claude; wired=1; fi
-    if [ -d "$HOME/.config/opencode" ]; then wire_opencode; wired=1; fi
-    if [ "$wired" = 0 ]; then
+    hosts=""
+    if [ -d "$HOME/.claude" ]; then wire_claude; hosts="claude"; fi
+    if [ -d "$HOME/.config/opencode" ]; then wire_opencode; hosts="$hosts opencode"; fi
+    if [ -z "$hosts" ]; then
       echo "install.sh: no host found on disk — run 'ski init -g claude' or 'ski init -g opencode' to wire one" >&2
+    else
+      # shellcheck disable=SC2086
+      prewarm $hosts
     fi
     ;;
   *) err "unknown SKI_HOST '${SKI_HOST}' (use: claude | opencode | both | none)" ;;
