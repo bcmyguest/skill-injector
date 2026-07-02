@@ -25,6 +25,7 @@
 
 use crate::config::Config;
 use crate::index::Index;
+use crate::rank::cmp_score_desc;
 use crate::text::content_tokens;
 use std::collections::HashMap;
 
@@ -118,11 +119,7 @@ pub fn scores(prompt: &str, idx: &Index) -> Vec<Lex> {
             }
         })
         .collect();
-    out.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    out.sort_by(|a, b| cmp_score_desc(a.score, b.score));
     out
 }
 
