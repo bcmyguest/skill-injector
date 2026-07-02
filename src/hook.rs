@@ -176,12 +176,13 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         Some(win) => vec![(win.id.clone(), win.score)],
         None => top_considered(&plan.rows),
     };
-    let mut selected = finalize(&plan.passed, stage, &cfg, &session);
-    // Drop the skill the user invoked by slash command — recommending it back is
-    // pure noise (the dominant false positive in telemetry: `/pickup` -> pickup).
-    if let Some(invoked) = &invoked_skill {
-        selected.retain(|r| &r.id != invoked);
-    }
+    // Drop the skill the user invoked by slash command *before* the cap —
+    // recommending it back is pure noise (the dominant false positive in
+    // telemetry: `/pickup` -> pickup), and if it were removed after `finalize`
+    // it would first consume one of the `max_skills` slots, pushing out a
+    // legitimate co-relevant skill.
+    let passed = without_invoked(&plan.passed, invoked_skill.as_deref());
+    let selected = finalize(&passed, stage, &cfg, &session);
     if selected.is_empty() {
         // Nothing cleared the gate (or dedup/deny/slash removal emptied it). Record
         // the considered ranking anyway so a native pick on this prompt can be
@@ -322,6 +323,16 @@ fn load_or_build_index(
     let idx = index::build(&skills, embedder, None)?;
     let _ = idx.save(&path);
     Ok(idx)
+}
+
+/// Drop the slash-invoked skill from the gate survivors *before* [`finalize`]'s
+/// `max_skills` cap, so it cannot consume a slot on its way to being removed.
+fn without_invoked(passed: &[Hit], invoked: Option<&str>) -> Vec<Hit> {
+    passed
+        .iter()
+        .filter(|h| Some(h.id.as_str()) != invoked)
+        .cloned()
+        .collect()
 }
 
 /// Apply the caller-side guardrails to the gate survivors from [`pipeline::decide`]:
@@ -618,6 +629,31 @@ mod tests {
             inject_mode(&[rec("a", 0.2), rec("b", 0.2)], &cfg),
             InjectMode::Body
         );
+    }
+
+    #[test]
+    fn invoked_skill_does_not_consume_a_cap_slot() {
+        // `/a something` with three gate survivors [a, b, c] and max_skills 2:
+        // dropping `a` after the cap would leave only [b]; dropping it before
+        // (as the hook now does) keeps the full [b, c].
+        let cfg = Config::default(); // max_skills 2
+        let session = Session::default();
+        let hits = vec![
+            hit("a", 0.90, 0.0),
+            hit("b", 0.85, 0.0),
+            hit("c", 0.84, 0.0),
+        ];
+        let passed = pipeline::cosine_passed(&hits, &cfg);
+        let got: Vec<String> = finalize(
+            &without_invoked(&passed, Some("a")),
+            Stage::Cosine,
+            &cfg,
+            &session,
+        )
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+        assert_eq!(got, ["b", "c"]);
     }
 
     #[test]

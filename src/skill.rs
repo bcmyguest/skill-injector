@@ -11,8 +11,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     /// First few prose lines of the body — dense topical signal that disambiguates
-    /// confusable descriptions without the dilution of the full document. Embedded
-    /// alongside `description`; see [`Skill::doc_text`].
+    /// confusable descriptions without the dilution of the full document. Read by
+    /// the stage-2 cross-encoder alongside `description` (see [`Skill::doc_text`]);
+    /// the stage-1 index embeds the description alone.
     pub body_head: String,
     /// Keywords for the hybrid keyword boost: explicit `keywords`/`aliases`
     /// frontmatter, plus tokens derived from the name.
@@ -28,9 +29,10 @@ pub struct Skill {
 }
 
 impl Skill {
-    /// Text fed to the document embedder: the curated description plus the body
-    /// head. Keeping them together gives the bi-encoder more topical signal than
-    /// the one-line description alone.
+    /// Document text for the stage-2 cross-encoder: the curated description plus
+    /// the body head — more topical signal for the reranker's joint read than the
+    /// one-line description alone. (Stage-1 retrieval embeds the description
+    /// only; its thresholds are calibrated to that distribution.)
     pub fn doc_text(&self) -> String {
         if self.body_head.is_empty() {
             self.description.clone()
