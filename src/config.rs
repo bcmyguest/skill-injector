@@ -371,18 +371,33 @@ pub struct FileConfig {
 
 impl FileConfig {
     /// Parse the user config, or an empty (all-default) overlay when the file is
-    /// missing or unparseable.
+    /// missing or unparseable. A malformed file still fails open (injection is
+    /// never blocked), but now says so on stderr: silently discarding the whole
+    /// file — including `deny` — over one bad line left users believing their
+    /// config was active when none of it was.
     pub fn load() -> Self {
-        std::fs::read_to_string(crate::paths::config_path())
-            .ok()
-            .and_then(|raw| Self::parse(&raw))
-            .unwrap_or_default()
+        let path = crate::paths::config_path();
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        match Self::parse(&raw) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                let msg = e.to_string();
+                let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                eprintln!(
+                    "ski: ignoring malformed config {} ({first}); running with defaults",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
     }
 
-    /// Pure TOML parse, shared by [`load`](Self::load) and tests. `None` on
+    /// Pure TOML parse, shared by [`load`](Self::load) and tests. `Err` on
     /// malformed input.
-    fn parse(raw: &str) -> Option<Self> {
-        toml::from_str(raw).ok()
+    fn parse(raw: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(raw)
     }
 
     /// Overlay every present field onto `cfg`. `roots` is ignored while the
@@ -686,7 +701,7 @@ mod tests {
 
     #[test]
     fn malformed_file_is_empty_overlay() {
-        assert!(FileConfig::parse("this is not = = toml").is_none());
+        assert!(FileConfig::parse("this is not = = toml").is_err());
     }
 
     #[test]

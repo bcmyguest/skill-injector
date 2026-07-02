@@ -30,7 +30,10 @@ struct RawEvent {
 /// its own index file (see [`crate::config::Config::for_host`]); the session
 /// re-arm is host-agnostic (session ids are unique across hosts).
 pub fn run(host: Host) -> anyhow::Result<()> {
-    let _ = session_start(host); // fail open: never surface an error to the harness.
+    // Fail open: never surface an error to the harness (SKI_DEBUG=1 traces it).
+    if let Err(e) = session_start(host) {
+        crate::debug::log(format_args!("session-start failed open: {e:#}"));
+    }
     Ok(())
 }
 

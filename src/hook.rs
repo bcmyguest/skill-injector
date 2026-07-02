@@ -56,9 +56,13 @@ struct Decision {
     skills: Vec<String>,
 }
 
-/// Run the hook for `host`. Always exits 0 (fail open).
+/// Run the hook for `host`. Always exits 0 (fail open); set `SKI_DEBUG=1` to
+/// see the swallowed error on stderr when injection silently stops.
 pub fn run(host: Host) -> anyhow::Result<()> {
-    let decision = decide(host).unwrap_or_default();
+    let decision = decide(host).unwrap_or_else(|e| {
+        crate::debug::log(format_args!("hook failed open: {e:#}"));
+        Decision::default()
+    });
     let out = match host {
         Host::Claude => render_claude(&decision),
         Host::Opencode => render_opencode(&decision),
@@ -306,10 +310,13 @@ fn load_or_build_index(
     // Swallow a load error (corrupt/truncated index) and fall through to a
     // rebuild rather than propagating — a bad index file must not brick the hook
     // on every prompt. Mirrors the self-healing read in `session_start::reindex`.
-    if let Some(idx) = Index::load(&path).ok().flatten() {
-        if idx.model == embedder.id() {
-            return Ok(idx);
-        }
+    match Index::load(&path) {
+        Ok(Some(idx)) if idx.model == embedder.id() => return Ok(idx),
+        Ok(_) => {}
+        Err(e) => crate::debug::log(format_args!(
+            "index {} unreadable ({e:#}); rebuilding",
+            path.display()
+        )),
     }
     let skills = skill::discover(&cfg.roots)?;
     let idx = index::build(&skills, embedder, None)?;

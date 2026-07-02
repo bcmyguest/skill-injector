@@ -123,14 +123,14 @@ fn main() -> Result<()> {
 fn cmd_index(host: Host, rebuild: bool) -> Result<()> {
     let (cfg, _file) = Config::load(host);
     let index_path = paths::index_path(host);
-    let skills = skill::discover(&cfg.roots)?;
+    let discovery = skill::discover_all(&cfg.roots);
     let embedder = embed::build(&cfg.model)?;
     let prev = if rebuild {
         None
     } else {
         Index::load(&index_path)?
     };
-    let idx = index::build(&skills, embedder.as_ref(), prev.as_ref())?;
+    let idx = index::build(&discovery.skills, embedder.as_ref(), prev.as_ref())?;
     idx.save(&index_path)?;
     println!(
         "indexed {} skills ({} dims) via '{}' -> {}",
@@ -139,14 +139,51 @@ fn cmd_index(host: Host, rebuild: bool) -> Result<()> {
         idx.model,
         index_path.display()
     );
+    report_skipped(&discovery.skipped);
+    if idx.skills.is_empty() {
+        eprintln!(
+            "note: no skills found. Discovery roots for this host: {}",
+            format_roots(&cfg.roots)
+        );
+        eprintln!("      install skills there, or point `roots` in config.toml / SKI_ROOTS at your library.");
+    }
     Ok(())
+}
+
+/// One stderr line per unusable `SKILL.md` (capped), so "my skill never
+/// injects" is diagnosable instead of silent.
+fn report_skipped(skipped: &[(std::path::PathBuf, String)]) {
+    const SHOW: usize = 10;
+    if skipped.is_empty() {
+        return;
+    }
+    eprintln!(
+        "note: skipped {} SKILL.md file(s) with unusable frontmatter:",
+        skipped.len()
+    );
+    for (path, reason) in skipped.iter().take(SHOW) {
+        eprintln!("  {}: {reason}", path.display());
+    }
+    if skipped.len() > SHOW {
+        eprintln!("  ... and {} more", skipped.len() - SHOW);
+    }
+}
+
+fn format_roots(roots: &[std::path::PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
     let (mut cfg, file) = Config::load(host);
-    let skills = skill::discover(&cfg.roots)?;
+    let discovery = skill::discover_all(&cfg.roots);
+    report_skipped(&discovery.skipped);
+    let skills = discovery.skills;
     if skills.is_empty() {
-        println!("no skills found in roots: {:?}", cfg.roots);
+        println!("no skills found in roots: {}", format_roots(&cfg.roots));
         return Ok(());
     }
     let embedder = embed::build(&cfg.model)?;
