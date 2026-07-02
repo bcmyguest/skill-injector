@@ -58,7 +58,10 @@ struct Decision {
 
 /// Run the hook for `host`. Always exits 0 (fail open).
 pub fn run(host: Host) -> anyhow::Result<()> {
-    let decision = decide(host).unwrap_or_default();
+    let decision = decide(host).unwrap_or_else(|e| {
+        crate::trace::debug("hook decide failed, injecting nothing", &e);
+        Decision::default()
+    });
     let out = match host {
         Host::Claude => render_claude(&decision),
         Host::Opencode => render_opencode(&decision),
