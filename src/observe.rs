@@ -42,7 +42,10 @@ struct ToolInput {
 /// `Read` of a `SKILL.md` path back to its skill id (see
 /// [`crate::paths::index_path`]); the `Skill`-tool path needs no index.
 pub fn run(host: Host) -> anyhow::Result<()> {
-    let _ = observe(host); // fail open: never surface an error to the harness.
+    // fail open: never surface an error to the harness (only trace under SKI_DEBUG).
+    if let Err(e) = observe(host) {
+        crate::trace::debug("observe failed", &e);
+    }
     Ok(())
 }
 

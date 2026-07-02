@@ -63,9 +63,10 @@ pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<Skill>> {
             Ok(Some(s)) => out.push(s),
             Ok(None) => {}
             Err(e) => {
-                if std::env::var_os("SKI_DEBUG").is_some() {
-                    eprintln!("ski: skipping unreadable skill file {}: {e}", f.display());
-                }
+                crate::trace::debug(
+                    &format!("skipping unreadable skill file {}", f.display()),
+                    &e,
+                );
             }
         }
     }
