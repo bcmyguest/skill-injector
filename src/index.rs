@@ -58,11 +58,22 @@ impl Index {
         Ok(Some(serde_json::from_str(&data)?))
     }
 
+    /// Persist the index. Writes a per-process temp file then atomically renames
+    /// it over the target, so a concurrent reader (a hook firing while
+    /// `session-start`/`why` refreshes the index) never observes a half-written
+    /// file — a torn read costs that hook a full re-embed of the library.
+    /// Mirrors [`crate::session::Session::save`].
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, serde_json::to_string_pretty(self)?)?;
+        let json = serde_json::to_string_pretty(self)?;
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        fs::write(&tmp, json)?;
+        if let Err(e) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 }
@@ -128,6 +139,83 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill::Skill;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Embedder that counts how many texts it was asked to embed, to prove the
+    /// incremental path reuses cached vectors instead of re-embedding.
+    struct CountingEmbedder(AtomicUsize);
+    impl Embedder for CountingEmbedder {
+        fn id(&self) -> String {
+            "counting".into()
+        }
+        fn embed(&self, texts: &[String], _: EmbedKind) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.0.fetch_add(texts.len(), Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    fn skill(id: &str, hash: &str) -> Skill {
+        Skill {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: format!("does {id}"),
+            body_head: String::new(),
+            keywords: Vec::new(),
+            trigger_phrases: Vec::new(),
+            path: std::path::PathBuf::from(format!("/s/{id}/SKILL.md")),
+            hash: hash.to_string(),
+        }
+    }
+
+    #[test]
+    fn rebuild_with_prev_reuses_unchanged_embeddings() {
+        let skills = vec![skill("a", "h1"), skill("b", "h2")];
+        let e = CountingEmbedder(AtomicUsize::new(0));
+        let first = build(&skills, &e, None).unwrap();
+        assert_eq!(e.0.load(Ordering::SeqCst), 2); // both embedded
+
+        // Same skills, prev supplied: nothing re-embeds (the `ski why` /
+        // session-start hot path).
+        let again = build(&skills, &e, Some(&first)).unwrap();
+        assert_eq!(
+            e.0.load(Ordering::SeqCst),
+            2,
+            "unchanged skills re-embedded"
+        );
+        assert_eq!(again.skills.len(), 2);
+
+        // One skill's content changes: only that one re-embeds.
+        let changed = vec![skill("a", "h1-new"), skill("b", "h2")];
+        let _ = build(&changed, &e, Some(&first)).unwrap();
+        assert_eq!(
+            e.0.load(Ordering::SeqCst),
+            3,
+            "expected exactly one re-embed"
+        );
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("ski-index-save-{}", std::process::id()));
+        let path = dir.join("index.json");
+        let idx = Index {
+            model: "m".into(),
+            dim: 2,
+            skills: vec![entry("a", "/s/a/SKILL.md")],
+        };
+        idx.save(&path).unwrap();
+        let back = Index::load(&path).unwrap().unwrap();
+        assert_eq!(back.skills[0].id, "a");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .filter(|n| n != "index.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     fn entry(id: &str, path: &str) -> Entry {
         Entry {

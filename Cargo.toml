@@ -24,6 +24,9 @@ fastembed = ["dep:fastembed"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+# Restore default SIGPIPE so `ski why ... | head` exits quietly instead of
+# panicking with a broken-pipe backtrace (Rust ignores SIGPIPE by default).
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Read-only parse of the optional `~/.config/ski/config.toml` user override.

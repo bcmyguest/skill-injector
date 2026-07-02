@@ -103,6 +103,13 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, so `ski why ... | head` used to panic with a
+    // broken-pipe backtrace once head closed the pipe. Restore the default
+    // die-quietly disposition, like other well-behaved CLI tools.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Index { rebuild, host } => cmd_index(host.parse::<Host>()?, rebuild),
@@ -189,7 +196,16 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
     file.apply_cosine(&mut cfg); // user pin wins over embedder calibration.
-    let idx = index::build(&skills, embedder.as_ref(), None)?;
+
+    // Reuse the persisted index instead of re-embedding the whole library on
+    // every invocation: `why` is the interactive tuning aid, and paying the full
+    // embed cost per call made it needlessly slow. Unchanged skills keep their
+    // cached vectors (same id+hash+model, exactly like the hook); the refreshed
+    // index is persisted back (best-effort) so the next `why`/hook reuses it too.
+    let index_path = paths::index_path(host);
+    let prev = Index::load(&index_path).ok().flatten();
+    let idx = index::build(&skills, embedder.as_ref(), prev.as_ref())?;
+    let _ = idx.save(&index_path);
     let query = embedder
         .embed(&[prompt.to_string()], EmbedKind::Query)?
         .remove(0);

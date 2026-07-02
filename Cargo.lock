@@ -2111,6 +2111,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fastembed",
+ "libc",
  "serde",
  "serde_json",
  "toml",
