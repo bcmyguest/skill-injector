@@ -26,7 +26,7 @@
 use crate::config::Config;
 use crate::index::Index;
 use crate::rank::cmp_score_desc;
-use crate::text::content_tokens;
+use crate::text::match_tokens;
 use std::collections::HashMap;
 
 /// BM25 term-frequency saturation. Standard Lucene/Elasticsearch default.
@@ -55,12 +55,13 @@ pub struct Lex {
 /// from the in-memory index every call — the descriptions are already stored, so
 /// no index-schema change is needed, and the corpus (tens to low-hundreds of
 /// short descriptions) is cheap to tokenize. Both prompt and descriptions are
-/// tokenized with [`content_tokens`] (stopword-stripped), so glue words neither
-/// inflate a score nor pad a document's length.
+/// tokenized with [`match_tokens`] (stopword-stripped, singular-normalized), so
+/// glue words neither inflate a score nor pad a document's length, and trivial
+/// inflection ("charts" ↔ "chart") no longer defeats a verbatim-only match.
 pub fn scores(prompt: &str, idx: &Index) -> Vec<Lex> {
     // Query terms as a set: a short prompt's repeats carry no extra signal, and
     // de-duping keeps a doubled word from double-counting one description's hit.
-    let mut q: Vec<String> = content_tokens(prompt);
+    let mut q: Vec<String> = match_tokens(prompt);
     q.sort();
     q.dedup();
     if q.is_empty() || idx.skills.is_empty() {
@@ -73,7 +74,7 @@ pub fn scores(prompt: &str, idx: &Index) -> Vec<Lex> {
         .iter()
         .map(|e| {
             let mut tf: HashMap<String, u32> = HashMap::new();
-            for t in content_tokens(&e.description) {
+            for t in match_tokens(&e.description) {
                 *tf.entry(t).or_insert(0) += 1;
             }
             tf
@@ -148,14 +149,14 @@ pub fn dominant(prompt: &str, idx: &Index, cfg: &Config) -> Option<Lex> {
     // Precision guard: reject a dominance carried by a single high-IDF term. Count
     // the distinct query content-tokens that actually appear in the winner's
     // description; a real indirect match overlaps on at least `MIN_TERM_OVERLAP`.
-    let mut q: Vec<String> = content_tokens(prompt);
+    let mut q: Vec<String> = match_tokens(prompt);
     q.sort();
     q.dedup();
     let win_terms: std::collections::HashSet<String> = idx
         .skills
         .iter()
         .find(|e| e.id == top.id)
-        .map(|e| content_tokens(&e.description).into_iter().collect())
+        .map(|e| match_tokens(&e.description).into_iter().collect())
         .unwrap_or_default();
     let overlap = q.iter().filter(|t| win_terms.contains(*t)).count();
     if overlap < MIN_TERM_OVERLAP {
@@ -222,9 +223,20 @@ mod tests {
     }
 
     #[test]
+    fn matches_across_plural_inflection() {
+        // Both sides tokenize through `match_tokens`, so a plural prompt still
+        // hits a singular description (and vice versa).
+        let idx = index_of(vec![
+            entry("xlsx", "edit a spreadsheet, charts and formulas"),
+            entry("pdf", "merge split and extract text from pdf documents"),
+        ]);
+        let ranked = scores("compute formulas across my spreadsheets", &idx);
+        assert_eq!(ranked[0].id, "xlsx");
+        assert!(ranked[0].score > 0.0);
+    }
+
+    #[test]
     fn dominant_requires_absolute_floor() {
-        // BM25 has no stemming, so the query token must appear verbatim in the
-        // description (singular "spreadsheet" here, matching the prompt).
         let idx = index_of(vec![
             entry("xlsx", "edit a spreadsheet, charts and formulas"),
             entry("pdf", "pdf documents"),

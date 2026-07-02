@@ -15,13 +15,20 @@ use crate::config::{InjectMode, Strength};
 use crate::index::{Entry, Index};
 use std::fs;
 
-/// A skill chosen for injection: its id and the confidence we'll display. The
-/// hook computes these (stage-appropriate confidence + dedup) and hands them to
-/// [`build`]; tests construct them directly.
+/// A skill chosen for injection: its id, the confidence we'll display, and an
+/// optional one-line evidence note (*why* this skill was surfaced — a referenced
+/// file, the workspace's ecosystem). The hook computes these (stage-appropriate
+/// confidence + dedup) and hands them to [`build`]; tests construct them directly.
 #[derive(Clone, Debug)]
 pub struct Rec {
     pub id: String,
     pub confidence: f32,
+    /// Concrete grounds for the recommendation, shown to the model. A directive
+    /// backed by observable evidence ("this workspace is a uv project") is harder
+    /// to dismiss than a bare assertion of relevance — and gives the model exactly
+    /// what it needs to judge fit for itself. `None` when the match is purely
+    /// semantic.
+    pub why: Option<String>,
 }
 
 /// Build the injection text for `recs` and return it alongside the ids actually
@@ -43,7 +50,9 @@ pub fn build(
             continue;
         };
         let block = match mode {
-            InjectMode::Directive => directive_block(entry, strength, r.confidence),
+            InjectMode::Directive => {
+                directive_block(entry, strength, r.confidence, r.why.as_deref())
+            }
             InjectMode::Body => body_block(entry),
         };
         if !blocks.is_empty() && used + block.len() > char_budget {
@@ -60,9 +69,17 @@ pub fn build(
 
     let header = match mode {
         InjectMode::Directive => {
+            // The dominant host failure mode is not picking the *wrong* skill, it
+            // is hand-rolling a task a skill already covers (see the recall-gap
+            // probe in `directive_block`'s docs). So the header states the
+            // decision rule outright: invoking a fitting skill beats doing the
+            // task by hand, and the only reason to skip one is clear irrelevance
+            // — which keeps the model's trust on prompts where ski over-surfaced.
             "ski matched these skills to your request — a dedicated retrieval+rerank pass, \
              separate from and complementary to the host's own skill selection. Invoke \
-             fitting ones by name via the `Skill` tool; do not Read the files:"
+             fitting ones by name via the `Skill` tool; do not Read the files. Prefer \
+             invoking a matching skill over doing its task by hand; skip a \
+             recommendation only if it clearly does not apply:"
         }
         InjectMode::Body => "Skill instructions relevant to this request are included below:",
     };
@@ -85,16 +102,32 @@ pub fn build(
 /// strong host ignores false injects regardless of how firmly they're phrased
 /// (3/3), so there is no precision benefit to hedging. If ski cleared the floor
 /// and injected, it asks firmly.
-fn directive_block(entry: &Entry, strength: Strength, confidence: f32) -> String {
+///
+/// `why`, when present, is inlined as the recommendation's evidence ("this
+/// workspace is a uv project"): concrete, checkable grounds are harder for the
+/// model to wave off than a bare relevance claim, and they let it verify fit
+/// instead of guessing.
+fn directive_block(
+    entry: &Entry,
+    strength: Strength,
+    confidence: f32,
+    why: Option<&str>,
+) -> String {
     let verb = match (strength, confidence::band(confidence)) {
         (Strength::Hard, Band::High) => "you MUST invoke it before responding.",
         (Strength::Hard, _) => "you should invoke it before responding.",
         (_, _) => "invoke it now, before you respond.",
     };
-    format!(
-        "- SkillRecommendation(`{}`): {} — {}",
-        entry.name, entry.description, verb
-    )
+    match why {
+        Some(why) => format!(
+            "- SkillRecommendation(`{}`): {} [matched because {why}] — {}",
+            entry.name, entry.description, verb
+        ),
+        None => format!(
+            "- SkillRecommendation(`{}`): {} — {}",
+            entry.name, entry.description, verb
+        ),
+    }
 }
 
 fn body_block(entry: &Entry) -> String {
@@ -156,7 +189,37 @@ mod tests {
         Rec {
             id: id.to_string(),
             confidence,
+            why: None,
         }
+    }
+
+    #[test]
+    fn directive_carries_evidence_when_present() {
+        let idx = index_of(vec![entry("a", "alpha", "/p/SKILL.md")]);
+        let with_why = Rec {
+            why: Some("this workspace is a uv project (uv.lock)".to_string()),
+            ..rec("a", 0.9)
+        };
+        let (text, _) = build(
+            &[with_why],
+            &idx,
+            InjectMode::Directive,
+            Strength::Soft,
+            6000,
+        );
+        assert!(
+            text.contains("[matched because this workspace is a uv project (uv.lock)]"),
+            "{text}"
+        );
+        // And absent evidence leaves the line clean.
+        let (text, _) = build(
+            &[rec("a", 0.9)],
+            &idx,
+            InjectMode::Directive,
+            Strength::Soft,
+            6000,
+        );
+        assert!(!text.contains("matched because"), "{text}");
     }
 
     #[test]

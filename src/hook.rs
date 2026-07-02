@@ -120,14 +120,21 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     } else {
         std::collections::BTreeSet::new()
     };
-    // Project-type channel: the working directory's manifest (`Cargo.toml`, ...)
-    // boosts its ecosystem's skill — an ambient signal, so gated downstream on the
-    // skill's own cosine. Empty/no-IO when the channel is off.
-    let project_ids = if cfg.project_boost > 0.0 {
-        context::project_ids(&event.cwd)
+    // Project-type channel: ecosystem terms from the working directory's manifests
+    // (`uv.lock`, `Cargo.toml`, ...) plus any code file named in the conversation
+    // (covers a session editing files outside its cwd), resolved dynamically
+    // against the installed library — an ambient signal, so gated downstream on
+    // the skill's own cosine. The id→term map is kept for the injection's
+    // evidence line. Empty/no-IO when the channel is off.
+    let project_hits: std::collections::BTreeMap<String, String> = if cfg.project_boost > 0.0 {
+        let mut terms = context::project_terms(&event.cwd);
+        let code_text = format!("{} {}", session.recent_prompts.join(" "), event.prompt);
+        terms.extend(context::code_terms(&code_text));
+        context::skills_for_terms(&terms, &idx)
     } else {
-        std::collections::BTreeSet::new()
+        std::collections::BTreeMap::new()
     };
+    let project_ids: std::collections::BTreeSet<String> = project_hits.keys().cloned().collect();
     let hits = rank::rank_all_ctx(
         &query,
         cvec.as_deref(),
@@ -182,7 +189,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // it would first consume one of the `max_skills` slots, pushing out a
     // legitimate co-relevant skill.
     let passed = without_invoked(&plan.passed, invoked_skill.as_deref());
-    let selected = finalize(&passed, stage, &cfg, &session);
+    let selected = finalize(&passed, stage, &cfg, &session, &project_hits);
     if selected.is_empty() {
         // Nothing cleared the gate (or dedup/deny/slash removal emptied it). Record
         // the considered ranking anyway so a native pick on this prompt can be
@@ -346,17 +353,44 @@ fn without_invoked(passed: &[Hit], invoked: Option<&str>) -> Vec<Hit> {
 /// Uniform across stages: for the lexical winner the `Stage::Lexical` mapping is a
 /// fixed High-band confidence ([`confidence::LEXICAL_CONF`]) that ignores the score;
 /// the reranker uses its logit; stage-1 uses its cosine blend.
-fn finalize(passed: &[Hit], stage: Stage, cfg: &Config, session: &Session) -> Vec<Rec> {
+///
+/// `project_hits` (skill id → matched ecosystem term) feeds the evidence line each
+/// [`Rec`] carries into the injection.
+fn finalize(
+    passed: &[Hit],
+    stage: Stage,
+    cfg: &Config,
+    session: &Session,
+    project_hits: &std::collections::BTreeMap<String, String>,
+) -> Vec<Rec> {
     passed
         .iter()
         .filter(|h| !cfg.deny.contains(&h.id))
         .map(|h| Rec {
             confidence: confidence::of(h.score, stage, cfg),
+            why: evidence(h, project_hits),
             id: h.id.clone(),
         })
         .filter(|r| session.should_recommend(&r.id, r.confidence, confidence::HIGH))
         .take(cfg.max_skills)
         .collect()
+}
+
+/// The concrete grounds (if any) behind a hit, for the injection's evidence line.
+/// Only the situational channels are surfaced — a named file of the skill's type,
+/// or the workspace/conversation's ecosystem — because those are the observable
+/// facts a model can check against the request; the dense/lexical scores are not
+/// evidence a model can reason about.
+fn evidence(h: &Hit, project_hits: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    if h.file > 0.0 {
+        return Some("a file of this skill's document type is part of this conversation".into());
+    }
+    if h.project > 0.0 {
+        return project_hits
+            .get(&h.id)
+            .map(|term| format!("you are working in a {term} project"));
+    }
+    None
 }
 
 /// Pick the inject shape for the chosen `recs`. Normally `cfg.inject_mode`, but a
@@ -470,6 +504,7 @@ mod tests {
             Stage::Cosine,
             cfg,
             session,
+            &std::collections::BTreeMap::new(),
         )
     }
 
@@ -582,7 +617,32 @@ mod tests {
         Rec {
             id: id.to_string(),
             confidence,
+            why: None,
         }
+    }
+
+    #[test]
+    fn finalize_attaches_project_evidence() {
+        let cfg = Config::default();
+        let session = Session::default();
+        let mut h = hit("uv-development", 0.90, 0.0);
+        h.project = 0.15; // the project channel fired for this skill
+        let project_hits: std::collections::BTreeMap<String, String> =
+            [("uv-development".to_string(), "uv".to_string())].into();
+        let got = finalize(&[h], Stage::Cosine, &cfg, &session, &project_hits);
+        assert_eq!(
+            got[0].why.as_deref(),
+            Some("you are working in a uv project")
+        );
+        // A purely semantic hit carries no evidence line.
+        let got = finalize(
+            &[hit("a", 0.90, 0.0)],
+            Stage::Cosine,
+            &cfg,
+            &session,
+            &project_hits,
+        );
+        assert_eq!(got[0].why, None);
     }
 
     #[test]
@@ -649,6 +709,7 @@ mod tests {
             Stage::Cosine,
             &cfg,
             &session,
+            &std::collections::BTreeMap::new(),
         )
         .into_iter()
         .map(|r| r.id)

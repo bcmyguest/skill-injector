@@ -3,7 +3,7 @@
 
 use crate::config::Config;
 use crate::index::Index;
-use crate::text::{content_tokens, tokenize};
+use crate::text::{match_tokens, norm_token, tokenize};
 use std::collections::{BTreeSet, HashSet};
 
 #[derive(Clone, Debug)]
@@ -24,10 +24,11 @@ pub struct Hit {
     /// directly-attributable context signal.
     pub file: f32,
     /// Boost from the working directory's project ecosystem (see
-    /// [`crate::context::project_ids`]). Zero unless the channel is on and a
-    /// matching manifest was found; gated on `cosine >= min_similarity` so this
-    /// ambient signal only breaks ties among already-plausible skills. Separate for
-    /// attribution.
+    /// [`crate::context::project_terms`] / [`crate::context::skills_for_terms`]).
+    /// Zero unless the channel is on and the skill's ecosystem matches; gated on
+    /// `cosine >= min_similarity - PROJECT_GATE_SLACK` so this ambient signal can
+    /// lift a *near*-floor ecosystem skill over the line but never rescue a
+    /// clearly-irrelevant one. Separate for attribution.
     pub project: f32,
     pub keyword: f32,
     /// Boost from matched trigger phrases (see [`phrase_score`]).
@@ -104,11 +105,15 @@ pub fn cmp_score_desc(a: f32, b: f32) -> std::cmp::Ordering {
     }
 }
 
+/// Keyword channel: `boost` per keyword found in the prompt. Both sides are
+/// normalized through [`norm_token`] at match time, so "make some charts" still
+/// hits a `chart` keyword — the surface channels shouldn't lose a match to
+/// trivial inflection the dense channel shrugs off.
 pub fn keyword_score(prompt: &str, keywords: &[String], boost: f32) -> f32 {
-    let toks: HashSet<String> = tokenize(prompt).into_iter().collect();
+    let toks: HashSet<String> = tokenize(prompt).iter().map(|t| norm_token(t)).collect();
     let hits = keywords
         .iter()
-        .filter(|k| toks.contains(k.as_str()))
+        .filter(|k| toks.contains(&norm_token(k)))
         .count();
     hits as f32 * boost
 }
@@ -118,20 +123,34 @@ pub fn keyword_score(prompt: &str, keywords: &[String], boost: f32) -> f32 {
 /// [`crate::skill::extract_phrases`]; requiring *all* its tokens (>=2 by
 /// construction) keeps the signal high-precision, so it lifts a skill on the
 /// exact wording the bi-encoder dilutes without firing on incidental overlap.
+/// Tokens on both sides are singular-normalized ([`norm_token`]) at match time,
+/// so a stored `merge pdf files` still fires on "merge these pdf file chunks".
 pub fn phrase_score(prompt: &str, phrases: &[String], boost: f32) -> f32 {
     if phrases.is_empty() {
         return 0.0;
     }
-    let toks: HashSet<String> = content_tokens(prompt).into_iter().collect();
+    let toks: HashSet<String> = match_tokens(prompt).into_iter().collect();
     let hits = phrases
         .iter()
         .filter(|p| {
             let mut pt = p.split_whitespace().peekable();
-            pt.peek().is_some() && pt.all(|t| toks.contains(t))
+            pt.peek().is_some() && pt.all(|t| toks.contains(&norm_token(t)))
         })
         .count();
     hits as f32 * boost
 }
+
+/// How far below `min_similarity` a skill's own cosine may sit and still receive
+/// the ambient project boost. The project signal is present on every turn, so it
+/// must not resurrect arbitrary skills — but the whole point of the channel is to
+/// surface the workspace's ecosystem skill on prompts that are *about* the project
+/// without naming the ecosystem ("add that dependency", "set up tests"), whose
+/// cosine hovers just under the floor. A small slack lets the boost carry exactly
+/// those over the line (ski deliberately errs toward surfacing; the model ignores
+/// a skill it doesn't need, and per-session dedup caps the cost at one showing),
+/// while a clearly-off-topic skill stays gated out. Mirrors
+/// [`crate::rerank`]'s `AGREEMENT_SLACK` shape.
+pub const PROJECT_GATE_SLACK: f32 = 0.06;
 
 /// Effective context-blend weight for a prompt whose best self-match cosine is
 /// `prompt_top`. Scales from `cfg.context_weight` (a *fully vague* prompt,
@@ -187,11 +206,13 @@ pub fn rank_all(query: &[f32], prompt: &str, index: &Index, cfg: &Config) -> Vec
 /// vagueness, since a named file is unambiguous.
 ///
 /// `project_ids` carries the ambient project-type channel (see
-/// [`crate::context::project_ids`]): a skill whose ecosystem matches the working
-/// directory's manifest gets `cfg.project_boost`, but — because this signal is
-/// present every turn — only when the skill's own cosine already clears
-/// `cfg.min_similarity`. So it reorders among already-plausible skills and can
-/// never, on its own, lift an irrelevant skill over the injection floor.
+/// [`crate::context::project_terms`] / [`crate::context::skills_for_terms`]): a
+/// skill whose ecosystem matches the working directory's manifests (or a code file
+/// referenced in the conversation) gets `cfg.project_boost`, but — because this
+/// signal is present every turn — only when the skill's own cosine is within
+/// [`PROJECT_GATE_SLACK`] of `cfg.min_similarity`. So it lifts near-plausible
+/// ecosystem skills over the floor and reorders among plausible ones, but cannot
+/// rescue a clearly-irrelevant skill.
 ///
 /// With `context = None`, empty `file_ids`/`project_ids`, and the features
 /// disabled, this is identical to [`rank_all`].
@@ -247,12 +268,13 @@ pub fn rank_all_ctx(
             } else {
                 0.0
             };
-            // Ambient project signal: gated on the skill's own cosine clearing the
-            // injection floor, so it can only break ties among plausible skills,
-            // never rescue an irrelevant one (the failure mode the keyword channel
-            // can hit on incidental mentions).
+            // Ambient project signal: gated on the skill's own cosine sitting
+            // within PROJECT_GATE_SLACK of the injection floor, so it lifts the
+            // workspace's ecosystem skill on near-plausible prompts but never
+            // rescues a clearly-irrelevant one (the failure mode the keyword
+            // channel can hit on incidental mentions).
             let project = if cfg.project_boost > 0.0
-                && cosine >= cfg.min_similarity
+                && cosine >= cfg.min_similarity - PROJECT_GATE_SLACK
                 && project_ids.contains(&e.id)
             {
                 cfg.project_boost
@@ -305,6 +327,7 @@ mod tests {
             vague_lo: 0.55,
             vague_hi: 0.65,
             file_boost: 0.0, // context-only baseline; file tests opt the channel in
+            project_boost: 0.0, // likewise for the (default-on) project channel
             ..Default::default()
         }
     }
@@ -432,24 +455,47 @@ mod tests {
     #[test]
     fn project_boost_gated_on_cosine_floor() {
         // The ambient project signal lifts a plausible skill but is gated on the
-        // skill's own cosine clearing `min_similarity` (default 0.30): it reorders
-        // among plausible skills yet never rescues an irrelevant one.
+        // skill's own cosine sitting within PROJECT_GATE_SLACK of `min_similarity`
+        // (default 0.30): it can lift a near-floor ecosystem skill, but never
+        // rescues a clearly-irrelevant one.
         let cfg = Config {
             project_boost: 0.2,
             ..ctx_cfg()
         };
         let proj: BTreeSet<String> = ["b".to_string()].into_iter().collect();
 
-        // Query aligned with `b`: cosine(q,b) = 1.0 >= 0.30 -> boost applies.
+        // Query aligned with `b`: cosine(q,b) = 1.0 >= gate -> boost applies.
         let hits = rank_all_ctx(&[0.0, 1.0], None, &no_files(), &proj, "", &idx2(), &cfg);
         let b = hits.iter().find(|h| h.id == "b").unwrap();
         assert!((b.project - 0.2).abs() < 1e-6);
 
-        // Query aligned with `a`: cosine(q,b) = 0.0 < 0.30 -> gated out despite `b`
-        // being in the project set.
+        // Query aligned with `a`: cosine(q,b) = 0.0, far below the gate -> gated
+        // out despite `b` being in the project set.
         let hits = rank_all_ctx(&[1.0, 0.0], None, &no_files(), &proj, "", &idx2(), &cfg);
         let b = hits.iter().find(|h| h.id == "b").unwrap();
         assert_eq!(b.project, 0.0);
+    }
+
+    #[test]
+    fn project_boost_lifts_near_floor_skill_over_the_line() {
+        // A prompt about the project without naming the ecosystem: the skill's own
+        // cosine sits just *under* the floor but within the slack, so the project
+        // boost applies and can carry it over the injection floor. This is the
+        // uv-in-a-python-repo case the channel exists for.
+        let cfg = Config {
+            project_boost: 0.2,
+            min_similarity: 0.30,
+            ..ctx_cfg()
+        };
+        let proj: BTreeSet<String> = ["b".to_string()].into_iter().collect();
+        // cosine(q,b) ~= 0.28: sub-floor (0.30) but within the 0.06 slack.
+        let q = [0.9578, 0.2873];
+        let hits = rank_all_ctx(&q, None, &no_files(), &proj, "", &idx2(), &cfg);
+        let b = hits.iter().find(|h| h.id == "b").unwrap();
+        assert!(b.cosine < cfg.min_similarity, "cosine {}", b.cosine);
+        assert!(b.cosine >= cfg.min_similarity - PROJECT_GATE_SLACK);
+        assert!((b.project - 0.2).abs() < 1e-6);
+        assert!(b.score >= cfg.min_similarity); // boosted over the floor
     }
 
     #[test]
@@ -535,6 +581,24 @@ mod tests {
         let kw = vec!["uv".to_string(), "setup".to_string()];
         assert!((keyword_score("set up with uv", &kw, 0.1) - 0.1).abs() < 1e-6); // only "uv"
         assert!((keyword_score("uv setup now", &kw, 0.1) - 0.2).abs() < 1e-6); // both
+    }
+
+    #[test]
+    fn keyword_boost_matches_across_plural_inflection() {
+        // "charts" in the prompt must hit a "chart" keyword (and vice versa): the
+        // surface channels normalize both sides through `norm_token` at match time.
+        let kw = vec!["chart".to_string(), "dependencies".to_string()];
+        assert!((keyword_score("make some charts", &kw, 0.1) - 0.1).abs() < 1e-6);
+        assert!((keyword_score("add a dependency", &kw, 0.1) - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn phrase_matches_across_plural_inflection() {
+        // Stored phrase tokens and prompt tokens are singular-normalized at match
+        // time, so trivial inflection doesn't defeat a full-phrase match.
+        let ph = vec!["merge pdf files".to_string()];
+        assert!((phrase_score("merge these pdf file chunks", &ph, 0.2) - 0.2).abs() < 1e-6);
+        assert!((phrase_score("merging is off topic here", &ph, 0.2) - 0.0).abs() < 1e-6);
     }
 
     #[test]

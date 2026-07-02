@@ -116,9 +116,11 @@ pub fn rerank(hits: &[Hit], idx: &Index, prompt: &str, cfg: &Config) -> Option<V
 /// included on purpose — a confident multi-token trigger match is exactly the
 /// "stage-1 judged relevant" signal this gate looks for, so it may carry an
 /// otherwise sub-floor cosine through; the context term rides along for the same
-/// reason. (The project term is in the sum too but can never tip this gate on its
-/// own: it is only non-zero when `cosine >= min_similarity`, which already clears
-/// the floor.) The cross-encoder's job is to reorder and confirm the *retrieved*
+/// reason. (The project term is in the sum too and — since it fires from
+/// [`crate::rank::PROJECT_GATE_SLACK`] below the floor — can likewise carry a
+/// near-floor ecosystem skill through, which is deliberate: the workspace's own
+/// ecosystem skill is exactly the recall ski should lean toward, and the reranker
+/// logit still gates it.) The cross-encoder's job is to reorder and confirm the *retrieved*
 /// relevant set, not to resurrect a skill stage-1 judged irrelevant. Without this
 /// gate a prompt with no real match — "implement the builder pattern in Java", "RSA
 /// key generation from scratch" — lets the reranker pull a sub-floor skill to the

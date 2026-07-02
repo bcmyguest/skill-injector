@@ -195,6 +195,12 @@ rerank_min = -2.5
 # Equivalent to setting the SKI_TELEMETRY env var.
 telemetry = false
 
+# Ambient workspace-ecosystem boost: manifests in/above cwd (uv.lock, Cargo.toml,
+# package.json, ...) and code files named in the conversation (etl.py, main.rs)
+# surface the matching skill from *your* library, whatever it is named. On by
+# default; 0 disables.
+# project_boost = 0.15
+
 # Stage-1 cosine thresholds. Normally left to per-embedder calibration; pin to override.
 # min_similarity = 0.30
 # score_margin   = 0.15
@@ -232,6 +238,14 @@ prompt ─▶ adapter (Claude hook / opencode plugin) ─▶ ski (Rust, one bina
   rather than embedding into noise matches. A `/<name>` slash invocation is an explicit
   skill choice, so the skill it names is never recommended back — that self-recommendation
   was the single largest false positive in `ski history`.
+- **Workspace awareness.** A document file named in the conversation (`sales.xlsx`)
+  boosts its skill directly, and the *project* channel reads the workspace: manifests
+  in or above the cwd (`uv.lock`, `Cargo.toml`, `package.json`, ...) and code files
+  named in the prompt (`etl.py`) yield ecosystem terms that are matched dynamically
+  against whatever skills you actually have installed — a uv repo surfaces *your* uv
+  skill by any name. When one of these channels fires, the injected line says why
+  ("matched because you are working in a uv project"), giving the model checkable
+  grounds instead of a bare relevance claim.
 - **Per-session dedup.** A skill injected by `ski` *or* loaded by the model itself is
   recorded in a session ledger and never re-injected — until compaction re-arms it.
 - **Fail-open everywhere.** Bad stdin, a missing index, any IO error → no output, exit 0.

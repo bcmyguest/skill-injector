@@ -181,10 +181,15 @@ fn main() -> anyhow::Result<()> {
         // files (a `.xlsx` etc.), mapping each to its skill.
         let file_text = format!("{} {}", c.context.join(" "), c.prompt);
         let file_ids = context::file_ids(&file_text);
-        // Ambient project-type channel: the case's cwd (5th column) maps to its
-        // ecosystem skill. Empty when the channel is off or no cwd is given.
+        // Ambient project-type channel: the case's cwd (5th column) yields
+        // ecosystem terms (plus any code file named in the conversation), resolved
+        // against the installed index. Empty when the channel is off.
         let project_ids = if cfg.project_boost > 0.0 {
-            context::project_ids(&c.cwd)
+            let mut terms = context::project_terms(&c.cwd);
+            terms.extend(context::code_terms(&file_text));
+            context::skills_for_terms(&terms, &idx)
+                .into_keys()
+                .collect()
         } else {
             std::collections::BTreeSet::new()
         };

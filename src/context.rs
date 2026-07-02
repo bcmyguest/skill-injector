@@ -17,7 +17,9 @@
 
 use crate::config::Config;
 use crate::embed::{EmbedKind, Embedder};
-use std::collections::BTreeSet;
+use crate::index::Index;
+use crate::text::{match_tokens, norm_token, tokenize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Skill ids implied by a file extension, for the file-type context channel. Only
@@ -44,6 +46,22 @@ fn ext_skill(ext: &str) -> Option<&'static str> {
     }
 }
 
+/// Iterate the filename-shaped tokens of `text`, yielding `(stem, extension)` for
+/// each token carrying a `.<ext>` suffix. Shared by the file-type channel
+/// ([`file_ids`]) and the code-file ecosystem scan ([`code_terms`]).
+fn file_tokens(text: &str) -> impl Iterator<Item = (&str, String)> {
+    text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | '`' | ','))
+        .filter_map(|tok| {
+            // Strip trailing punctuation that commonly hugs a filename in prose.
+            let tok = tok.trim_end_matches(['.', ':', ';', '!', '?']);
+            let (stem, ext) = tok.rsplit_once('.')?;
+            if stem.is_empty() {
+                return None; // a bare ".pdf" with no name is not a real reference.
+            }
+            Some((stem, ext.to_ascii_lowercase()))
+        })
+}
+
 /// Skill ids implied by file references in `text` (a prompt and/or recent-window
 /// turns): scans whitespace-separated tokens for a trailing `.<ext>` and maps each
 /// known extension through [`ext_skill`]. This is the *directly attributable*
@@ -52,39 +70,65 @@ fn ext_skill(ext: &str) -> Option<&'static str> {
 /// prompt vagueness. De-duplicated.
 pub fn file_ids(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for tok in
-        text.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | ')' | '`' | ','))
-    {
-        // Strip trailing punctuation that commonly hugs a filename in prose.
-        let tok = tok.trim_end_matches(['.', ':', ';', '!', '?']);
-        if let Some((stem, ext)) = tok.rsplit_once('.') {
-            if stem.is_empty() {
-                continue; // a bare ".pdf" with no name is not a real reference.
-            }
-            let ext = ext.to_ascii_lowercase();
-            if let Some(id) = ext_skill(&ext) {
-                out.insert(id.to_string());
-            }
+    for (_, ext) in file_tokens(text) {
+        if let Some(id) = ext_skill(&ext) {
+            out.insert(id.to_string());
         }
     }
     out
 }
 
-/// Known project-manifest filenames and the canonical skill each implies, for the
-/// project-type context channel. Mirrors [`ext_skill`]'s precision discipline: only
-/// ecosystems whose *general* identity is a single skill are mapped, and the target
-/// is that general best-practices skill — an ambient "this is a rust repo" signal
-/// points at idiomatic rust broadly, not a specialized sub-skill (async patterns)
-/// the cwd alone cannot justify. Ecosystems whose general skill is itself ambiguous
-/// are deliberately absent: python splits across testing/perf/pandas and the JS
-/// frameworks compete, so there is no 1:1 manifest→skill identity (the same reason
-/// generic code extensions are unmapped in `ext_skill`). Bare-filename manifests
-/// only — manifest-less ecosystems (terraform's loose `.tf` files) are left for a
-/// later readdir-based pass.
-const PROJECT_MANIFESTS: &[(&str, &str)] = &[
-    ("Cargo.toml", "rust-best-practices"),
-    ("go.mod", "golang-code-style"),
+/// Known project-manifest filenames and the ecosystem terms each implies, for the
+/// project-type context channel. Unlike the file channel's 1:1 skill-id map, these
+/// are *terms* matched dynamically against whatever library the user actually has
+/// installed ([`skills_for_terms`]) — a `uv.lock` surfaces *their* uv skill
+/// whatever it is named, and an unmatched term simply maps to nothing. That is why
+/// multi-skill ecosystems (python, the JS frameworks) can be listed here where the
+/// old hardcoded-id map had to leave them out: every plausibly-matching skill gets
+/// the (cosine-gated, deliberately recall-leaning) boost and the model arbitrates.
+const MANIFEST_TERMS: &[(&str, &[&str])] = &[
+    ("Cargo.toml", &["rust", "cargo"]),
+    ("go.mod", &["go", "golang"]),
+    ("uv.lock", &["uv", "python"]),
+    ("pyproject.toml", &["python"]),
+    ("requirements.txt", &["python", "pip"]),
+    ("setup.py", &["python"]),
+    ("Pipfile", &["python"]),
+    ("package.json", &["javascript", "node", "npm"]),
+    ("tsconfig.json", &["typescript"]),
+    ("Gemfile", &["ruby"]),
+    ("pom.xml", &["java", "maven"]),
+    ("build.gradle", &["java", "gradle"]),
+    ("build.gradle.kts", &["kotlin", "gradle"]),
+    ("Dockerfile", &["docker"]),
+    ("docker-compose.yml", &["docker"]),
+    ("compose.yaml", &["docker"]),
+    ("flake.nix", &["nix"]),
+    ("CMakeLists.txt", &["cmake"]),
 ];
+
+/// Ecosystem terms implied by a *code* file's extension, feeding the same ambient
+/// project channel as the manifests. This covers the session working outside the
+/// project root (cwd walk finds nothing) but naming `scripts/etl.py` in the
+/// prompt, and attached code files. Kept to unambiguous language identities;
+/// document formats stay with the higher-precision, ungated [`ext_skill`] channel.
+fn ext_terms(ext: &str) -> Option<&'static [&'static str]> {
+    Some(match ext {
+        "py" => &["python"],
+        "ipynb" => &["python", "jupyter", "notebook"],
+        "rs" => &["rust"],
+        "go" => &["go", "golang"],
+        "ts" | "tsx" => &["typescript"],
+        "js" | "jsx" | "mjs" => &["javascript", "node"],
+        "rb" => &["ruby"],
+        "java" => &["java"],
+        "kt" => &["kotlin"],
+        "tf" => &["terraform"],
+        "sql" => &["sql"],
+        "sh" | "bash" => &["shell", "bash"],
+        _ => return None,
+    })
+}
 
 /// How many directory levels to walk upward from `cwd` looking for a manifest. A
 /// session's cwd is often a subdirectory of the project root where the manifest
@@ -92,26 +136,82 @@ const PROJECT_MANIFESTS: &[(&str, &str)] = &[
 /// stat its way to the filesystem root.
 const PROJECT_WALK_LEVELS: usize = 6;
 
-/// Skill ids implied by the project manifest(s) found in `cwd` or any ancestor
-/// directory (up to [`PROJECT_WALK_LEVELS`]). This is the *ambient* project-type
-/// signal — unlike a named file it is present every turn, so [`crate::rank`] gates
-/// its boost on the skill's own cosine and the channel defaults off. Performs cheap
-/// `exists()` stats only; de-duplicated; empty when `cwd` is empty or no known
-/// manifest is found.
-pub fn project_ids(cwd: &str) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
+/// Append `term` if it isn't already present — an order-preserving de-dup, so a
+/// term list keeps most-specific-first ordering (the order [`MANIFEST_TERMS`] /
+/// [`ext_terms`] list them in) for [`skills_for_terms`]'s first-match-wins
+/// evidence attribution: a uv.lock reports "a uv project", not "a python project".
+fn push_term(out: &mut Vec<String>, term: &str) {
+    if !out.iter().any(|t| t == term) {
+        out.push(term.to_string());
+    }
+}
+
+/// Ecosystem terms implied by the project manifest(s) found in `cwd` or any
+/// ancestor directory (up to [`PROJECT_WALK_LEVELS`]). Performs cheap `exists()`
+/// stats only; order-preserving and de-duplicated (most specific term first);
+/// empty when `cwd` is empty or no known manifest is found. Resolve against the
+/// installed library with [`skills_for_terms`].
+pub fn project_terms(cwd: &str) -> Vec<String> {
+    let mut out = Vec::new();
     if cwd.is_empty() {
         return out;
     }
     let mut dir = Some(Path::new(cwd));
     for _ in 0..PROJECT_WALK_LEVELS {
         let Some(d) = dir else { break };
-        for (manifest, id) in PROJECT_MANIFESTS {
+        for (manifest, terms) in MANIFEST_TERMS {
             if d.join(manifest).exists() {
-                out.insert((*id).to_string());
+                for t in terms.iter() {
+                    push_term(&mut out, t);
+                }
             }
         }
         dir = d.parent();
+    }
+    out
+}
+
+/// Ecosystem terms implied by code files referenced in `text` (a prompt and/or
+/// recent-window turns), via [`ext_terms`]. Order-preserving, de-duplicated.
+pub fn code_terms(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (_, ext) in file_tokens(text) {
+        if let Some(terms) = ext_terms(&ext) {
+            for t in terms.iter() {
+                push_term(&mut out, t);
+            }
+        }
+    }
+    out
+}
+
+/// Resolve ecosystem `terms` against the installed library: every index entry
+/// whose keywords (which include its name tokens) or description mention a term
+/// maps to that term. Returns skill id → the matched term (for evidence display;
+/// the first matching term in `terms` order wins, so callers should pass the
+/// most specific term first). Matching is token-exact after [`norm_token`]
+/// normalization — "uv" matches a `uv` keyword or "uv" in the description prose,
+/// never a substring — and deliberately generous beyond that: this feeds the
+/// *ambient* channel, which stays cosine-gated in [`crate::rank::rank_all_ctx`],
+/// so a spurious term match costs nothing unless the skill was already
+/// near-plausible for the prompt.
+pub fn skills_for_terms(terms: &[String], idx: &Index) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if terms.is_empty() {
+        return out;
+    }
+    let terms: Vec<String> = terms.iter().map(|t| norm_token(t)).collect();
+    for e in &idx.skills {
+        let mut toks: BTreeSet<String> = e
+            .keywords
+            .iter()
+            .flat_map(|k| tokenize(k))
+            .map(|t| norm_token(&t))
+            .collect();
+        toks.extend(match_tokens(&e.description));
+        if let Some(term) = terms.iter().find(|t| toks.contains(*t)) {
+            out.insert(e.id.clone(), term.clone());
+        }
     }
     out
 }
@@ -325,8 +425,8 @@ mod tests {
     }
 
     #[test]
-    fn project_ids_maps_manifest_in_cwd_and_ancestors() {
-        // Hermetic temp tree: <root>/Cargo.toml and a nested cwd two levels down.
+    fn project_terms_maps_manifest_in_cwd_and_ancestors() {
+        // Hermetic temp tree: <root>/uv.lock and a nested cwd two levels down.
         let root = std::env::temp_dir().join(format!(
             "ski-proj-{}-{}",
             std::process::id(),
@@ -335,26 +435,83 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let nested = root.join("crates").join("inner");
+        let nested = root.join("src").join("inner");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.join("Cargo.toml"), b"[package]\n").unwrap();
+        std::fs::write(root.join("uv.lock"), b"version = 1\n").unwrap();
 
-        // Manifest in cwd itself.
-        assert!(project_ids(root.to_str().unwrap()).contains("rust-best-practices"));
+        // Manifest in cwd itself: uv.lock implies uv (most specific, listed
+        // first) then python — order matters for evidence attribution.
+        let terms = project_terms(root.to_str().unwrap());
+        assert_eq!(terms, ["uv", "python"], "{terms:?}");
         // Manifest found by walking up from a nested cwd.
-        assert!(project_ids(nested.to_str().unwrap()).contains("rust-best-practices"));
+        assert!(project_terms(nested.to_str().unwrap())
+            .iter()
+            .any(|t| t == "uv"));
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn project_ids_empty_when_no_manifest_or_blank_cwd() {
-        assert!(project_ids("").is_empty());
-        // A real directory with no known manifest (the temp dir root) maps nothing.
-        let bare = std::env::temp_dir();
-        assert!(!project_ids(bare.to_str().unwrap()).contains("go-code-style"));
+    fn project_terms_empty_when_no_manifest_or_blank_cwd() {
+        assert!(project_terms("").is_empty());
         // A nonexistent path stats cleanly to empty.
-        assert!(project_ids("/no/such/ski/path/here").is_empty());
+        assert!(project_terms("/no/such/ski/path/here").is_empty());
+    }
+
+    #[test]
+    fn code_terms_maps_referenced_code_files() {
+        let got = code_terms("please fix scripts/etl.py and look at handler.rs");
+        assert!(
+            got.iter().any(|t| t == "python") && got.iter().any(|t| t == "rust"),
+            "{got:?}"
+        );
+        // Document formats belong to the file channel, not this one; prose with no
+        // filenames maps nothing.
+        assert!(code_terms("clean up report.xlsx").is_empty());
+        assert!(code_terms("set up a project").is_empty());
+    }
+
+    #[test]
+    fn skills_for_terms_matches_installed_library_dynamically() {
+        let entry = |id: &str, description: &str, keywords: &[&str]| crate::index::Entry {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: description.to_string(),
+            path: String::new(),
+            keywords: keywords.iter().map(|k| k.to_string()).collect(),
+            trigger_phrases: Vec::new(),
+            hash: String::new(),
+            embedding: Vec::new(),
+        };
+        let idx = crate::index::Index {
+            model: "test".into(),
+            dim: 0,
+            skills: vec![
+                // The user's-own-library case: matched via its `uv` keyword.
+                entry(
+                    "uv-development",
+                    "Bootstrap and manage projects.",
+                    &["uv", "python"],
+                ),
+                // Matched via description prose only (no keywords).
+                entry(
+                    "rusty-style",
+                    "Idiomatic Rust patterns and error handling.",
+                    &[],
+                ),
+                // No ecosystem mention anywhere -> unmatched.
+                entry("git-attribution", "Credit AI assistance in commits.", &[]),
+            ],
+        };
+        let terms = vec!["uv".to_string(), "python".to_string(), "rust".to_string()];
+        let got = skills_for_terms(&terms, &idx);
+        // First matching term wins: uv-development matches both `uv` and `python`
+        // keywords, and reports the more specific, earlier-listed `uv`.
+        assert_eq!(got.get("uv-development").map(String::as_str), Some("uv"));
+        assert_eq!(got.get("rusty-style").map(String::as_str), Some("rust"));
+        assert!(!got.contains_key("git-attribution"));
+        // Empty terms resolve to nothing.
+        assert!(skills_for_terms(&[], &idx).is_empty());
     }
 
     #[test]

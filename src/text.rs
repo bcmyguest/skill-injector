@@ -44,6 +44,42 @@ pub fn content_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Light, deterministic singular form of a (lowercase) token, so the surface-form
+/// channels — keyword, phrase, BM25 — match across trivial inflection
+/// ("spreadsheets" ↔ "spreadsheet", "dependencies" ↔ "dependency"). Not a real
+/// stemmer: it only needs to be *consistent*, because both the prompt side and the
+/// skill side are normalized through it at match time. Applied at match time only —
+/// never inside the embedders — so persisted index vectors are untouched.
+pub fn norm_token(t: &str) -> String {
+    let b = t.as_bytes();
+    let n = b.len();
+    if n <= 3 || !t.ends_with('s') {
+        return t.to_string();
+    }
+    // "class", "status", "analysis": common non-plural s-endings stay whole.
+    if t.ends_with("ss") || t.ends_with("us") || t.ends_with("is") {
+        return t.to_string();
+    }
+    if n > 4 && t.ends_with("ies") {
+        return format!("{}y", &t[..n - 3]); // dependencies -> dependency
+    }
+    if t.ends_with("sses")
+        || t.ends_with("ches")
+        || t.ends_with("shes")
+        || t.ends_with("xes")
+        || t.ends_with("zes")
+    {
+        return t[..n - 2].to_string(); // branches -> branch, boxes -> box
+    }
+    t[..n - 1].to_string() // charts -> chart
+}
+
+/// [`content_tokens`], each normalized through [`norm_token`] — the form the
+/// surface-matching channels (phrase, BM25) compare prompt and skill text in.
+pub fn match_tokens(s: &str) -> Vec<String> {
+    content_tokens(s).iter().map(|t| norm_token(t)).collect()
+}
+
 /// FNV-1a 32-bit — stable token→bucket hash for the bag-of-words embedder.
 pub fn fnv1a_32(s: &str) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
@@ -91,6 +127,32 @@ mod tests {
         );
         // A phrase that is *only* stopwords/short words collapses to nothing.
         assert!(content_tokens("set it up").is_empty() || content_tokens("set it up") == ["set"]);
+    }
+
+    #[test]
+    fn norm_token_singularizes_common_plurals() {
+        assert_eq!(norm_token("spreadsheets"), "spreadsheet");
+        assert_eq!(norm_token("charts"), "chart");
+        assert_eq!(norm_token("dependencies"), "dependency");
+        assert_eq!(norm_token("branches"), "branch");
+        assert_eq!(norm_token("boxes"), "box");
+        assert_eq!(norm_token("classes"), "class");
+    }
+
+    #[test]
+    fn norm_token_leaves_non_plurals_alone() {
+        // Short tokens and common non-plural s-endings must survive intact.
+        for t in ["uv", "css", "class", "status", "analysis", "chart", "rust"] {
+            assert_eq!(norm_token(t), t);
+        }
+    }
+
+    #[test]
+    fn match_tokens_normalizes_content_tokens() {
+        assert_eq!(
+            match_tokens("compute the formulas in these spreadsheets"),
+            ["compute", "formula", "spreadsheet"]
+        );
     }
 
     #[test]

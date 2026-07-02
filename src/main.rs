@@ -223,10 +223,14 @@ fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
         std::collections::BTreeSet::new()
     };
     let project_ids = if cfg.project_boost > 0.0 {
-        std::env::current_dir()
+        let mut terms = std::env::current_dir()
             .ok()
-            .map(|d| context::project_ids(&d.to_string_lossy()))
-            .unwrap_or_default()
+            .map(|d| context::project_terms(&d.to_string_lossy()))
+            .unwrap_or_default();
+        terms.extend(context::code_terms(prompt));
+        context::skills_for_terms(&terms, &idx)
+            .into_keys()
+            .collect()
     } else {
         std::collections::BTreeSet::new()
     };
