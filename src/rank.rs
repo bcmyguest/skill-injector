@@ -58,7 +58,16 @@ impl Hit {
     }
 }
 
+/// Cosine similarity. `0.0` on a dimension mismatch — rather than silently
+/// zipping to the shorter vector (a meaningless partial dot product) — since a
+/// query and an index entry from different embedders/dimensions should never be
+/// compared at all; the `model == id()` guard in `hook::load_or_build_index`
+/// normally prevents this, but a hand-edited or same-id-different-dim index
+/// should score as "no match", not a truncated garbage value.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
     for (x, y) in a.iter().zip(b.iter()) {
         dot += x * y;
@@ -69,6 +78,21 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         0.0
     } else {
         dot / (na.sqrt() * nb.sqrt())
+    }
+}
+
+/// Descending comparator for sorting by score. `f32::partial_cmp` returns `None`
+/// only when a NaN is involved; the common `.unwrap_or(Ordering::Equal)` fallback
+/// then makes a NaN compare equal to everything, which can leave it sorted into
+/// rank 0 (a stable sort keeps *some* input order among "equal" elements, and a
+/// NaN score should never win). This instead sorts any NaN strictly last,
+/// regardless of which side of the comparison it's on.
+pub fn cmp_score_desc(a: f32, b: f32) -> std::cmp::Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (false, false) => b.partial_cmp(&a).unwrap_or(std::cmp::Ordering::Equal),
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater, // a is NaN -> sorts after b
+        (false, true) => std::cmp::Ordering::Less,    // b is NaN -> sorts after a
     }
 }
 
@@ -244,11 +268,7 @@ pub fn rank_all_ctx(
             hit
         })
         .collect();
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    hits.sort_by(|a, b| cmp_score_desc(a.score, b.score));
     hits
 }
 
@@ -447,6 +467,30 @@ mod tests {
         let c = [0.0, 1.0, 0.0];
         assert!((cosine(&a, &b) - 1.0).abs() < 1e-6);
         assert!(cosine(&a, &c).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_rejects_dimension_mismatch() {
+        // A shorter/longer vector must score 0.0 (no match), not a truncated
+        // partial dot product silently computed over the shared prefix.
+        let a = [1.0, 0.0, 0.0];
+        let b = [1.0, 0.0];
+        assert_eq!(cosine(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn cmp_score_desc_sorts_nan_last_either_side() {
+        let mut v = [f32::NAN, 0.5, 2.0, -1.0];
+        v.sort_by(|a, b| cmp_score_desc(*a, *b));
+        assert_eq!(&v[..3], &[2.0, 0.5, -1.0]);
+        assert!(v[3].is_nan());
+    }
+
+    #[test]
+    fn cmp_score_desc_regular_values_descend() {
+        let mut v = vec![1.0, 3.0, 2.0];
+        v.sort_by(|a, b| cmp_score_desc(*a, *b));
+        assert_eq!(v, [3.0, 2.0, 1.0]);
     }
 
     #[test]

@@ -32,7 +32,7 @@
 
 use crate::config::Config;
 use crate::index::Index;
-use crate::rank::Hit;
+use crate::rank::{cmp_score_desc, Hit};
 
 /// How far below stage-1's solo-injection floor (`min_similarity`) a reranked
 /// candidate may sit and still inject — the cosine "credit" the cross-encoder's
@@ -77,7 +77,7 @@ pub fn confident_winner(hits: &[Hit], cfg: &Config) -> bool {
         return false;
     }
     let mut cos: Vec<f32> = hits.iter().map(|h| h.cosine).collect();
-    cos.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    cos.sort_by(|a, b| cmp_score_desc(*a, *b));
     let c1 = cos[0];
     let c2 = cos.get(1).copied().unwrap_or(0.0);
     c1 >= cfg.high_conf && (c1 - c2) >= cfg.clear_gap
