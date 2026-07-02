@@ -1,0 +1,37 @@
+name: CI
+
+# The deterministic offline lane on every push/PR: fmt, clippy, and the full
+# test suite with `--no-default-features` (bag-of-words embedder — no model
+# download, no network), exactly what DEVELOPING.md and the pre-commit hooks
+# run. The default-feature build is compile-checked so a fastembed-only break
+# can't land silently, but its tests stay out of CI (they need the one-time
+# model download).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  offline:
+    name: fmt + clippy + test (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy (offline lane)
+        run: cargo clippy --no-default-features --all-targets -- -D warnings
+      - name: cargo test (offline lane)
+        run: cargo test --no-default-features
+      - name: cargo check (default features compile)
+        run: cargo check --all-targets
