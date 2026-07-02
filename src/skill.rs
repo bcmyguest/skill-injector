@@ -52,7 +52,8 @@ pub struct Discovery {
 }
 
 /// Walk `roots` and parse every `SKILL.md` found. One bad file never aborts the
-/// pass — it is recorded in `skipped` and the rest of the library survives.
+/// pass — it is recorded in `skipped` (and traced under `SKI_DEBUG`) and the
+/// rest of the library survives.
 pub fn discover_all(roots: &[PathBuf]) -> Discovery {
     let mut files = Vec::new();
     for r in roots {
@@ -66,7 +67,10 @@ pub fn discover_all(roots: &[PathBuf]) -> Discovery {
     for f in files {
         match parse_skill(&f) {
             Ok(s) => skills.push(s),
-            Err(reason) => skipped.push((f, reason)),
+            Err(reason) => {
+                crate::trace::debug(&format!("skipping skill file {}", f.display()), &reason);
+                skipped.push((f, reason));
+            }
         }
     }
     skills.sort_by(|a, b| a.id.cmp(&b.id));
@@ -80,13 +84,14 @@ pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<Skill>> {
     Ok(discover_all(roots).skills)
 }
 
-/// Max directory depth below each discovery root. Real skill trees are a few
-/// levels deep; the cap keeps a pathological (or cyclic-bind-mounted) tree from
-/// recursing without bound, mirroring `context::PROJECT_WALK_LEVELS`.
-const MAX_DISCOVER_DEPTH: usize = 16;
+/// Deepest subdirectory nesting `collect` will descend into per root, mirroring
+/// `context::PROJECT_WALK_LEVELS`. Bounds the walk against a pathologically deep
+/// real tree; a symlink loop is already safe (kernel `ELOOP`), this guards the
+/// non-symlink case.
+const MAX_WALK_DEPTH: usize = 12;
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    if depth > MAX_DISCOVER_DEPTH {
+    if depth >= MAX_WALK_DEPTH {
         return;
     }
     let Ok(rd) = fs::read_dir(dir) else { return };
@@ -291,9 +296,9 @@ fn body_head(content: &str, max_lines: usize, max_chars: usize) -> String {
 /// Keys are matched at column 0 only, so an indented key nested under another
 /// map is never mistaken for a top-level one.
 pub fn parse_frontmatter(content: &str) -> Option<(String, String, Vec<String>)> {
-    // Tolerate a UTF-8 BOM: without this the first line reads "\u{feff}---" and
-    // the whole file is rejected.
-    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    // A leading UTF-8 BOM (U+FEFF) is not whitespace to `str::trim`, so an
+    // untouched line 1 would never equal "---"; strip it before the check.
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
     let mut lines = content.lines().peekable();
     if lines.next()?.trim() != "---" {
         return None;
@@ -638,7 +643,7 @@ mod tests {
             fnv1a_64(b"depth")
         ));
         let mut deep = root.clone();
-        for i in 0..(MAX_DISCOVER_DEPTH + 3) {
+        for i in 0..(MAX_WALK_DEPTH + 3) {
             deep = deep.join(format!("d{i}"));
         }
         fs::create_dir_all(&deep).unwrap();
@@ -666,5 +671,72 @@ mod tests {
         .unwrap();
         assert!(parse_file(&path).unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_file_tolerates_non_utf8_bytes() {
+        // A non-UTF8 SKILL.md must not error `parse_file` (which would otherwise
+        // bubble through `discover` and blank out the whole library) — it lossily
+        // decodes, and since the mangled frontmatter check then fails, it degrades
+        // to `Ok(None)` (skipped) rather than `Err`.
+        let dir = std::env::temp_dir().join(format!("ski-nonutf8-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("SKILL.md");
+        fs::write(&path, [0xff, 0xfe, b'-', b'-', b'-', 0x00]).unwrap();
+        assert!(parse_file(&path).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_skips_unreadable_file_instead_of_aborting() {
+        // One bad path among several must not blank out the rest of the library:
+        // discover() should skip the unreadable entry and still return the others.
+        let dir = std::env::temp_dir().join(format!("ski-discover-skip-{}", std::process::id()));
+        let good = dir.join("good");
+        fs::create_dir_all(&good).unwrap();
+        fs::write(
+            good.join("SKILL.md"),
+            "---\nname: good-skill\ndescription: A perfectly fine skill.\n---\nbody\n",
+        )
+        .unwrap();
+        // A directory named SKILL.md can never be opened as a file -> read error.
+        let bad = dir.join("bad");
+        fs::create_dir_all(&bad).unwrap();
+        fs::create_dir_all(bad.join("SKILL.md")).unwrap();
+
+        let found = discover(std::slice::from_ref(&dir)).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "good-skill");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_frontmatter_strips_leading_bom() {
+        let md = "\u{FEFF}---\nname: x\ndescription: d\n---\n";
+        let (name, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(name, "x");
+        assert_eq!(desc, "d");
+    }
+
+    #[test]
+    fn collect_bounds_recursion_depth() {
+        // Build a chain of nested dirs deeper than MAX_WALK_DEPTH with a SKILL.md
+        // at the bottom; it must not be found (and, more importantly, must not
+        // blow the stack on a real pathological tree).
+        let root = std::env::temp_dir().join(format!("ski-deep-{}", std::process::id()));
+        let mut dir = root.clone();
+        for i in 0..MAX_WALK_DEPTH + 5 {
+            dir = dir.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: too-deep\ndescription: unreachable.\n---\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        collect(&root, &mut out, 0);
+        assert!(out.is_empty(), "found a file past the depth cap: {out:?}");
+        let _ = fs::remove_dir_all(&root);
     }
 }

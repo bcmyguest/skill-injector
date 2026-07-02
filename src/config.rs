@@ -371,27 +371,26 @@ pub struct FileConfig {
 
 impl FileConfig {
     /// Parse the user config, or an empty (all-default) overlay when the file is
-    /// missing or unparseable. A malformed file still fails open (injection is
-    /// never blocked), but now says so on stderr: silently discarding the whole
-    /// file — including `deny` — over one bad line left users believing their
-    /// config was active when none of it was.
+    /// missing. Still fail-open on a malformed file (never blocks injection),
+    /// but — unlike a missing file, which is a normal, silent no-op — a
+    /// *present but unparseable* file means the user's overrides (`deny`, a
+    /// tuned `rerank_min`, ...) are being silently ignored, which is worth a
+    /// one-line stderr warning (with the parse location) so they can find out
+    /// without already knowing to set `SKI_DEBUG`.
     pub fn load() -> Self {
         let path = crate::paths::config_path();
         let Ok(raw) = std::fs::read_to_string(&path) else {
-            return Self::default();
+            return Self::default(); // no file: not an error, nothing to say.
         };
-        match Self::parse(&raw) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                let msg = e.to_string();
-                let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                eprintln!(
-                    "ski: ignoring malformed config {} ({first}); running with defaults",
-                    path.display()
-                );
-                Self::default()
-            }
-        }
+        Self::parse(&raw).unwrap_or_else(|e| {
+            let msg = e.to_string();
+            let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            eprintln!(
+                "ski: {} is not valid TOML ({first}); ignoring it and using defaults",
+                path.display()
+            );
+            Self::default()
+        })
     }
 
     /// Pure TOML parse, shared by [`load`](Self::load) and tests. `Err` on
@@ -702,6 +701,30 @@ mod tests {
     #[test]
     fn malformed_file_is_empty_overlay() {
         assert!(FileConfig::parse("this is not = = toml").is_err());
+    }
+
+    #[test]
+    fn load_falls_back_to_defaults_on_malformed_on_disk_file() {
+        // FileConfig::load() must still fail open on a *present but unparseable*
+        // config.toml (only the stderr warning is new — the caller never sees an
+        // error and the result behaves exactly like a missing file).
+        let dir = std::env::temp_dir().join(format!("ski-cfg-load-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ski")).unwrap();
+        std::fs::write(dir.join("ski/config.toml"), "max_skills = \"nope\"").unwrap();
+
+        let prev = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let file = FileConfig::load();
+        match prev {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+
+        let mut cfg = Config::default();
+        let default_max_skills = cfg.max_skills;
+        file.apply(&mut cfg);
+        assert_eq!(cfg.max_skills, default_max_skills); // the bad field never applied
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

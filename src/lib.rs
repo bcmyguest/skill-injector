@@ -8,7 +8,6 @@
 pub mod confidence;
 pub mod config;
 pub mod context;
-pub mod debug;
 pub mod embed;
 pub mod history;
 pub mod hook;
@@ -26,3 +25,4 @@ pub mod session_start;
 pub mod skill;
 pub mod telemetry;
 pub mod text;
+pub mod trace;

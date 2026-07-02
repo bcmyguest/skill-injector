@@ -60,7 +60,7 @@ struct Decision {
 /// see the swallowed error on stderr when injection silently stops.
 pub fn run(host: Host) -> anyhow::Result<()> {
     let decision = decide(host).unwrap_or_else(|e| {
-        crate::debug::log(format_args!("hook failed open: {e:#}"));
+        crate::trace::debug("hook decide failed, injecting nothing", &e);
         Decision::default()
     });
     let out = match host {
@@ -314,10 +314,10 @@ fn load_or_build_index(
     match Index::load(&path) {
         Ok(Some(idx)) if idx.model == embedder.id() => return Ok(idx),
         Ok(_) => {}
-        Err(e) => crate::debug::log(format_args!(
-            "index {} unreadable ({e:#}); rebuilding",
-            path.display()
-        )),
+        Err(e) => crate::trace::debug(
+            &format!("index {} unreadable; rebuilding", path.display()),
+            &e,
+        ),
     }
     let skills = skill::discover(&cfg.roots)?;
     let idx = index::build(&skills, embedder, None)?;

@@ -30,9 +30,9 @@ struct RawEvent {
 /// its own index file (see [`crate::config::Config::for_host`]); the session
 /// re-arm is host-agnostic (session ids are unique across hosts).
 pub fn run(host: Host) -> anyhow::Result<()> {
-    // Fail open: never surface an error to the harness (SKI_DEBUG=1 traces it).
+    // fail open: never surface an error to the harness (only trace under SKI_DEBUG).
     if let Err(e) = session_start(host) {
-        crate::debug::log(format_args!("session-start failed open: {e:#}"));
+        crate::trace::debug("session-start failed", &e);
     }
     Ok(())
 }
@@ -54,19 +54,28 @@ fn session_start(host: Host) -> anyhow::Result<()> {
 }
 
 /// Incrementally refresh the persisted index. Best-effort: any failure (no
-/// skills, embedder build, IO) leaves the previous index untouched.
+/// skills, embedder build, IO) leaves the previous index untouched (traced
+/// under `SKI_DEBUG` — a reindex that silently never lands is otherwise
+/// indistinguishable from "no skills changed").
 fn reindex(host: Host) {
     let (cfg, _file) = Config::load(host);
-    let Ok(skills) = skill::discover(&cfg.roots) else {
-        return;
+    let skills = match skill::discover(&cfg.roots) {
+        Ok(s) => s,
+        Err(e) => return crate::trace::debug("session-start: skill discovery failed", &e),
     };
-    let Ok(embedder) = embed::build(&cfg.model) else {
-        return;
+    let embedder = match embed::build(&cfg.model) {
+        Ok(e) => e,
+        Err(e) => return crate::trace::debug("session-start: embedder build failed", &e),
     };
     let index_path = paths::index_path(host);
     let prev = Index::load(&index_path).ok().flatten();
-    if let Ok(idx) = index::build(&skills, embedder.as_ref(), prev.as_ref()) {
-        let _ = idx.save(&index_path);
+    match index::build(&skills, embedder.as_ref(), prev.as_ref()) {
+        Ok(idx) => {
+            if let Err(e) = idx.save(&index_path) {
+                crate::trace::debug("session-start: saving reindexed index failed", &e);
+            }
+        }
+        Err(e) => crate::trace::debug("session-start: index build failed", &e),
     }
 }
 
