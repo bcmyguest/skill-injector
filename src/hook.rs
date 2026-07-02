@@ -150,7 +150,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // sees it even if this turn injects nothing. No-op/no-IO when the feature is off.
     if cfg.context_depth > 0 {
         session.push_prompt(&event.prompt, cfg.context_depth);
-        let _ = session.save(&session_path);
+        let _ = session.save_merged(&session_path);
     }
 
     // With telemetry on, remember the active prompt now (before any early return)
@@ -159,7 +159,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // per prompt, paid only by telemetry users.
     if telemetry::enabled() {
         session.last_prompt = event.prompt.clone();
-        let _ = session.save(&session_path);
+        let _ = session.save_merged(&session_path);
     }
     // Stage 1.5 + 2 cascade — single-sourced in `pipeline`, shared with `ski why`
     // and `examples/eval`: a dominant lexical (BM25) winner injects directly unless
@@ -228,7 +228,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     for (id, conf) in &injected {
         session.mark_recommended(id, *conf);
     }
-    let _ = session.save(&session_path); // best-effort: state IO never blocks.
+    let _ = session.save_merged(&session_path); // best-effort: state IO never blocks.
 
     // Successful inject: `abstained` is None and `considered` carries the pre-gate
     // ranking so the injected ids can be located within it during analysis.
