@@ -67,7 +67,7 @@ fn observe(host: Host) -> anyhow::Result<()> {
     let path = paths::session_path(&ev.session_id);
     let mut session = Session::load(&path);
     session.mark_used(&id);
-    let _ = session.save(&path); // best-effort: state IO never blocks.
+    let _ = session.save_merged(&path); // best-effort: state IO never blocks.
 
     let via = if ev.tool_name.eq_ignore_ascii_case("Read") {
         "read"

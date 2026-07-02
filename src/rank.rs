@@ -75,9 +75,17 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
         nb += y * y;
     }
     if na == 0.0 || nb == 0.0 {
-        0.0
+        return 0.0;
+    }
+    let c = dot / (na.sqrt() * nb.sqrt());
+    // A corrupt index (a hand-edited or overflowed vector, e.g. `1e999` parsing
+    // to +inf) yields a NaN here; NaN compares Equal to everything in the sort
+    // below, so the corrupt entry could silently claim rank 0. Treat it as "no
+    // signal" instead.
+    if c.is_finite() {
+        c
     } else {
-        dot / (na.sqrt() * nb.sqrt())
+        0.0
     }
 }
 
@@ -458,6 +466,35 @@ mod tests {
             &ctx_cfg(),
         );
         assert!(hits.iter().all(|h| h.project == 0.0));
+    }
+
+    #[test]
+    fn corrupt_infinite_embedding_cannot_claim_rank() {
+        // An overflowed vector in a hand-edited/corrupt index (`1e999` parses to
+        // +inf) used to produce a NaN cosine, which compared Equal to every score
+        // and could land anywhere — including rank 0. It must score 0 instead.
+        let entry = |id: &str, emb: Vec<f32>| crate::index::Entry {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            path: String::new(),
+            keywords: Vec::new(),
+            trigger_phrases: Vec::new(),
+            hash: String::new(),
+            embedding: emb,
+        };
+        let idx = Index {
+            model: "m".into(),
+            dim: 2,
+            skills: vec![
+                entry("corrupt", vec![f32::INFINITY, 0.0]),
+                entry("real", vec![1.0, 0.0]),
+            ],
+        };
+        let hits = rank_all(&[1.0, 0.0], "", &idx, &Config::default());
+        assert_eq!(hits[0].id, "real");
+        assert_eq!(hits.iter().find(|h| h.id == "corrupt").unwrap().score, 0.0);
+        assert!(hits.iter().all(|h| h.score.is_finite()));
     }
 
     #[test]

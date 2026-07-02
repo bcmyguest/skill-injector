@@ -56,7 +56,8 @@ struct Decision {
     skills: Vec<String>,
 }
 
-/// Run the hook for `host`. Always exits 0 (fail open).
+/// Run the hook for `host`. Always exits 0 (fail open); set `SKI_DEBUG=1` to
+/// see the swallowed error on stderr when injection silently stops.
 pub fn run(host: Host) -> anyhow::Result<()> {
     let decision = decide(host).unwrap_or_else(|e| {
         crate::trace::debug("hook decide failed, injecting nothing", &e);
@@ -149,7 +150,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // sees it even if this turn injects nothing. No-op/no-IO when the feature is off.
     if cfg.context_depth > 0 {
         session.push_prompt(&event.prompt, cfg.context_depth);
-        let _ = session.save(&session_path);
+        let _ = session.save_merged(&session_path);
     }
 
     // With telemetry on, remember the active prompt now (before any early return)
@@ -158,7 +159,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     // per prompt, paid only by telemetry users.
     if telemetry::enabled() {
         session.last_prompt = event.prompt.clone();
-        let _ = session.save(&session_path);
+        let _ = session.save_merged(&session_path);
     }
     // Stage 1.5 + 2 cascade — single-sourced in `pipeline`, shared with `ski why`
     // and `examples/eval`: a dominant lexical (BM25) winner injects directly unless
@@ -175,12 +176,13 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
         Some(win) => vec![(win.id.clone(), win.score)],
         None => top_considered(&plan.rows),
     };
-    let mut selected = finalize(&plan.passed, stage, &cfg, &session);
-    // Drop the skill the user invoked by slash command — recommending it back is
-    // pure noise (the dominant false positive in telemetry: `/pickup` -> pickup).
-    if let Some(invoked) = &invoked_skill {
-        selected.retain(|r| &r.id != invoked);
-    }
+    // Drop the skill the user invoked by slash command *before* the cap —
+    // recommending it back is pure noise (the dominant false positive in
+    // telemetry: `/pickup` -> pickup), and if it were removed after `finalize`
+    // it would first consume one of the `max_skills` slots, pushing out a
+    // legitimate co-relevant skill.
+    let passed = without_invoked(&plan.passed, invoked_skill.as_deref());
+    let selected = finalize(&passed, stage, &cfg, &session);
     if selected.is_empty() {
         // Nothing cleared the gate (or dedup/deny/slash removal emptied it). Record
         // the considered ranking anyway so a native pick on this prompt can be
@@ -226,7 +228,7 @@ fn decide(host: Host) -> anyhow::Result<Decision> {
     for (id, conf) in &injected {
         session.mark_recommended(id, *conf);
     }
-    let _ = session.save(&session_path); // best-effort: state IO never blocks.
+    let _ = session.save_merged(&session_path); // best-effort: state IO never blocks.
 
     // Successful inject: `abstained` is None and `considered` carries the pre-gate
     // ranking so the injected ids can be located within it during analysis.
@@ -309,15 +311,28 @@ fn load_or_build_index(
     // Swallow a load error (corrupt/truncated index) and fall through to a
     // rebuild rather than propagating — a bad index file must not brick the hook
     // on every prompt. Mirrors the self-healing read in `session_start::reindex`.
-    if let Some(idx) = Index::load(&path).ok().flatten() {
-        if idx.model == embedder.id() {
-            return Ok(idx);
-        }
+    match Index::load(&path) {
+        Ok(Some(idx)) if idx.model == embedder.id() => return Ok(idx),
+        Ok(_) => {}
+        Err(e) => crate::trace::debug(
+            &format!("index {} unreadable; rebuilding", path.display()),
+            &e,
+        ),
     }
     let skills = skill::discover(&cfg.roots)?;
     let idx = index::build(&skills, embedder, None)?;
     let _ = idx.save(&path);
     Ok(idx)
+}
+
+/// Drop the slash-invoked skill from the gate survivors *before* [`finalize`]'s
+/// `max_skills` cap, so it cannot consume a slot on its way to being removed.
+fn without_invoked(passed: &[Hit], invoked: Option<&str>) -> Vec<Hit> {
+    passed
+        .iter()
+        .filter(|h| Some(h.id.as_str()) != invoked)
+        .cloned()
+        .collect()
 }
 
 /// Apply the caller-side guardrails to the gate survivors from [`pipeline::decide`]:
@@ -614,6 +629,31 @@ mod tests {
             inject_mode(&[rec("a", 0.2), rec("b", 0.2)], &cfg),
             InjectMode::Body
         );
+    }
+
+    #[test]
+    fn invoked_skill_does_not_consume_a_cap_slot() {
+        // `/a something` with three gate survivors [a, b, c] and max_skills 2:
+        // dropping `a` after the cap would leave only [b]; dropping it before
+        // (as the hook now does) keeps the full [b, c].
+        let cfg = Config::default(); // max_skills 2
+        let session = Session::default();
+        let hits = vec![
+            hit("a", 0.90, 0.0),
+            hit("b", 0.85, 0.0),
+            hit("c", 0.84, 0.0),
+        ];
+        let passed = pipeline::cosine_passed(&hits, &cfg);
+        let got: Vec<String> = finalize(
+            &without_invoked(&passed, Some("a")),
+            Stage::Cosine,
+            &cfg,
+            &session,
+        )
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+        assert_eq!(got, ["b", "c"]);
     }
 
     #[test]

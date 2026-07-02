@@ -36,6 +36,7 @@ enum Cmd {
     /// Rank skills against a prompt and print scores (tuning aid).
     Why {
         /// The prompt (all trailing words are joined).
+        #[arg(required = true)]
         prompt: Vec<String>,
         /// How many ranked skills to show.
         #[arg(long, default_value_t = 10)]
@@ -103,6 +104,13 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, so `ski why ... | head` used to panic with a
+    // broken-pipe backtrace once head closed the pipe. Restore the default
+    // die-quietly disposition, like other well-behaved CLI tools.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Index { rebuild, host } => cmd_index(host.parse::<Host>()?, rebuild),
@@ -123,14 +131,14 @@ fn main() -> Result<()> {
 fn cmd_index(host: Host, rebuild: bool) -> Result<()> {
     let (cfg, _file) = Config::load(host);
     let index_path = paths::index_path(host);
-    let skills = skill::discover(&cfg.roots)?;
+    let discovery = skill::discover_all(&cfg.roots);
     let embedder = embed::build(&cfg.model)?;
     let prev = if rebuild {
         None
     } else {
         Index::load(&index_path)?
     };
-    let idx = index::build(&skills, embedder.as_ref(), prev.as_ref())?;
+    let idx = index::build(&discovery.skills, embedder.as_ref(), prev.as_ref())?;
     idx.save(&index_path)?;
     println!(
         "indexed {} skills ({} dims) via '{}' -> {}",
@@ -139,20 +147,66 @@ fn cmd_index(host: Host, rebuild: bool) -> Result<()> {
         idx.model,
         index_path.display()
     );
+    report_skipped(&discovery.skipped);
+    if idx.skills.is_empty() {
+        eprintln!(
+            "note: no skills found. Discovery roots for this host: {}",
+            format_roots(&cfg.roots)
+        );
+        eprintln!("      install skills there, or point `roots` in config.toml / SKI_ROOTS at your library.");
+    }
     Ok(())
+}
+
+/// One stderr line per unusable `SKILL.md` (capped), so "my skill never
+/// injects" is diagnosable instead of silent.
+fn report_skipped(skipped: &[(std::path::PathBuf, String)]) {
+    const SHOW: usize = 10;
+    if skipped.is_empty() {
+        return;
+    }
+    eprintln!(
+        "note: skipped {} SKILL.md file(s) with unusable frontmatter:",
+        skipped.len()
+    );
+    for (path, reason) in skipped.iter().take(SHOW) {
+        eprintln!("  {}: {reason}", path.display());
+    }
+    if skipped.len() > SHOW {
+        eprintln!("  ... and {} more", skipped.len() - SHOW);
+    }
+}
+
+fn format_roots(roots: &[std::path::PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn cmd_why(host: Host, prompt: &str, top: usize) -> Result<()> {
     let (mut cfg, file) = Config::load(host);
-    let skills = skill::discover(&cfg.roots)?;
+    let discovery = skill::discover_all(&cfg.roots);
+    report_skipped(&discovery.skipped);
+    let skills = discovery.skills;
     if skills.is_empty() {
-        println!("no skills found in roots: {:?}", cfg.roots);
+        println!("no skills found in roots: {}", format_roots(&cfg.roots));
         return Ok(());
     }
     let embedder = embed::build(&cfg.model)?;
     cfg.calibrate_to(embedder.as_ref());
     file.apply_cosine(&mut cfg); // user pin wins over embedder calibration.
-    let idx = index::build(&skills, embedder.as_ref(), None)?;
+
+    // Reuse the persisted index instead of re-embedding the whole library on
+    // every invocation: `why` is the interactive tuning aid, and paying the full
+    // embed cost per call made it needlessly slow. Unchanged skills keep their
+    // cached vectors (same id+hash+model, exactly like the hook); the refreshed
+    // index is persisted back (best-effort) so the next `why`/hook reuses it too.
+    let index_path = paths::index_path(host);
+    let prev = Index::load(&index_path).ok().flatten();
+    let idx = index::build(&skills, embedder.as_ref(), prev.as_ref())?;
+    let _ = idx.save(&index_path);
     let query = embedder
         .embed(&[prompt.to_string()], EmbedKind::Query)?
         .remove(0);

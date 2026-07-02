@@ -375,26 +375,28 @@ impl FileConfig {
     /// but — unlike a missing file, which is a normal, silent no-op — a
     /// *present but unparseable* file means the user's overrides (`deny`, a
     /// tuned `rerank_min`, ...) are being silently ignored, which is worth a
-    /// one-line stderr warning so they can find out without already knowing to
-    /// set `SKI_DEBUG`.
+    /// one-line stderr warning (with the parse location) so they can find out
+    /// without already knowing to set `SKI_DEBUG`.
     pub fn load() -> Self {
         let path = crate::paths::config_path();
         let Ok(raw) = std::fs::read_to_string(&path) else {
             return Self::default(); // no file: not an error, nothing to say.
         };
-        Self::parse(&raw).unwrap_or_else(|| {
+        Self::parse(&raw).unwrap_or_else(|e| {
+            let msg = e.to_string();
+            let first = msg.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
             eprintln!(
-                "ski: {} is not valid TOML; ignoring it and using defaults",
+                "ski: {} is not valid TOML ({first}); ignoring it and using defaults",
                 path.display()
             );
             Self::default()
         })
     }
 
-    /// Pure TOML parse, shared by [`load`](Self::load) and tests. `None` on
+    /// Pure TOML parse, shared by [`load`](Self::load) and tests. `Err` on
     /// malformed input.
-    fn parse(raw: &str) -> Option<Self> {
-        toml::from_str(raw).ok()
+    fn parse(raw: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(raw)
     }
 
     /// Overlay every present field onto `cfg`. `roots` is ignored while the
@@ -698,7 +700,7 @@ mod tests {
 
     #[test]
     fn malformed_file_is_empty_overlay() {
-        assert!(FileConfig::parse("this is not = = toml").is_none());
+        assert!(FileConfig::parse("this is not = = toml").is_err());
     }
 
     #[test]

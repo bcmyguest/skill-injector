@@ -11,8 +11,9 @@ pub struct Skill {
     pub name: String,
     pub description: String,
     /// First few prose lines of the body — dense topical signal that disambiguates
-    /// confusable descriptions without the dilution of the full document. Embedded
-    /// alongside `description`; see [`Skill::doc_text`].
+    /// confusable descriptions without the dilution of the full document. Read by
+    /// the stage-2 cross-encoder alongside `description` (see [`Skill::doc_text`]);
+    /// the stage-1 index embeds the description alone.
     pub body_head: String,
     /// Keywords for the hybrid keyword boost: explicit `keywords`/`aliases`
     /// frontmatter, plus tokens derived from the name.
@@ -28,9 +29,10 @@ pub struct Skill {
 }
 
 impl Skill {
-    /// Text fed to the document embedder: the curated description plus the body
-    /// head. Keeping them together gives the bi-encoder more topical signal than
-    /// the one-line description alone.
+    /// Document text for the stage-2 cross-encoder: the curated description plus
+    /// the body head — more topical signal for the reranker's joint read than the
+    /// one-line description alone. (Stage-1 retrieval embeds the description
+    /// only; its thresholds are calibrated to that distribution.)
     pub fn doc_text(&self) -> String {
         if self.body_head.is_empty() {
             self.description.clone()
@@ -40,16 +42,19 @@ impl Skill {
     }
 }
 
-/// Deepest subdirectory nesting `collect` will descend into per root, mirroring
-/// `context::PROJECT_WALK_LEVELS`. Bounds the walk against a pathologically deep
-/// real tree; a symlink loop is already safe (kernel `ELOOP`), this guards the
-/// non-symlink case.
-const MAX_WALK_DEPTH: usize = 12;
+/// A discovery pass: the parsed skills, plus every `SKILL.md` that was found but
+/// yielded no skill (unreadable, unusable frontmatter, placeholder) with the
+/// reason — so `ski index` can say *why* a skill is missing instead of silently
+/// indexing without it.
+pub struct Discovery {
+    pub skills: Vec<Skill>,
+    pub skipped: Vec<(PathBuf, String)>,
+}
 
-/// Walk `roots` and parse every `SKILL.md` found. A single unreadable or
-/// malformed file is skipped (with a `SKI_DEBUG`-gated note) rather than
-/// aborting discovery for every other skill.
-pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<Skill>> {
+/// Walk `roots` and parse every `SKILL.md` found. One bad file never aborts the
+/// pass — it is recorded in `skipped` (and traced under `SKI_DEBUG`) and the
+/// rest of the library survives.
+pub fn discover_all(roots: &[PathBuf]) -> Discovery {
     let mut files = Vec::new();
     for r in roots {
         collect(r, &mut files, 0);
@@ -57,23 +62,33 @@ pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<Skill>> {
     files.sort();
     files.dedup();
 
-    let mut out = Vec::new();
-    for f in &files {
-        match parse_file(f) {
-            Ok(Some(s)) => out.push(s),
-            Ok(None) => {}
-            Err(e) => {
-                crate::trace::debug(
-                    &format!("skipping unreadable skill file {}", f.display()),
-                    &e,
-                );
+    let mut skills = Vec::new();
+    let mut skipped = Vec::new();
+    for f in files {
+        match parse_skill(&f) {
+            Ok(s) => skills.push(s),
+            Err(reason) => {
+                crate::trace::debug(&format!("skipping skill file {}", f.display()), &reason);
+                skipped.push((f, reason));
             }
         }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    out.dedup_by(|a, b| a.id == b.id);
-    Ok(out)
+    skills.sort_by(|a, b| a.id.cmp(&b.id));
+    skills.dedup_by(|a, b| a.id == b.id);
+    Discovery { skills, skipped }
 }
+
+/// Walk `roots` and parse every `SKILL.md` found (skills only; see
+/// [`discover_all`] for the skip diagnostics).
+pub fn discover(roots: &[PathBuf]) -> anyhow::Result<Vec<Skill>> {
+    Ok(discover_all(roots).skills)
+}
+
+/// Deepest subdirectory nesting `collect` will descend into per root, mirroring
+/// `context::PROJECT_WALK_LEVELS`. Bounds the walk against a pathologically deep
+/// real tree; a symlink loop is already safe (kernel `ELOOP`), this guards the
+/// non-symlink case.
+const MAX_WALK_DEPTH: usize = 12;
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth >= MAX_WALK_DEPTH {
@@ -110,18 +125,34 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     }
 }
 
-/// Parse a single `SKILL.md`. Returns `None` if it lacks a usable frontmatter.
-/// Reads bytes and lossily decodes them rather than `read_to_string`, so a
-/// single non-UTF8 file degrades to mojibake (and likely fails the frontmatter
-/// check) instead of erroring the whole library out of discovery.
+/// Parse a single `SKILL.md`. Returns `None` when the file yields no usable
+/// skill for *any* reason — unreadable file as well as missing/placeholder
+/// frontmatter — so a caller holding a possibly-stale path (e.g. the reranker's
+/// doc-text read) degrades gracefully. Use [`discover_all`] when the skip
+/// *reason* matters; the `Result` wrapper is kept for signature compatibility.
 pub fn parse_file(path: &Path) -> anyhow::Result<Option<Skill>> {
-    let bytes = fs::read(path)?;
-    let content = String::from_utf8_lossy(&bytes).into_owned();
-    let Some((name, description, mut keywords)) = parse_frontmatter(&content) else {
-        return Ok(None);
+    Ok(parse_skill(path).ok())
+}
+
+/// Parse a single `SKILL.md`, or the reason it yields no skill. The content is
+/// read lossily (one stray non-UTF8 byte must not disqualify a skill, let alone
+/// abort discovery of the whole library) and a leading UTF-8 BOM is stripped so
+/// BOM-saved files still match the `---` frontmatter fence.
+fn parse_skill(path: &Path) -> Result<Skill, String> {
+    let bytes = fs::read(path).map_err(|e| format!("read failed: {e}"))?;
+    let content = String::from_utf8_lossy(&bytes);
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let Some((name, description, mut keywords)) = parse_frontmatter(content) else {
+        return Err("no leading `--- ... ---` YAML frontmatter".into());
     };
-    if name.is_empty() || description.is_empty() || is_placeholder(&description) {
-        return Ok(None);
+    if name.is_empty() {
+        return Err("frontmatter has no `name:`".into());
+    }
+    if description.is_empty() {
+        return Err("frontmatter has no `description:`".into());
+    }
+    if is_placeholder(&description) {
+        return Err("unfilled template placeholder description".into());
     }
     for tok in tokenize(&name) {
         if !keywords.contains(&tok) {
@@ -130,16 +161,16 @@ pub fn parse_file(path: &Path) -> anyhow::Result<Option<Skill>> {
     }
     let hash = format!("{:016x}", fnv1a_64(content.as_bytes()));
     let trigger_phrases = extract_phrases(&description);
-    Ok(Some(Skill {
+    Ok(Skill {
         id: name.clone(),
         name,
         description,
-        body_head: body_head(&content, 8, 600),
+        body_head: body_head(content, 8, 600),
         keywords,
         trigger_phrases,
         path: path.to_path_buf(),
         hash,
-    }))
+    })
 }
 
 /// Minimum content tokens (stopwords excluded) for a quoted span to qualify as a
@@ -255,34 +286,104 @@ fn body_head(content: &str, max_lines: usize, max_chars: usize) -> String {
 }
 
 /// Extract `name`, `description`, and `keywords`/`aliases` from a leading
-/// `--- ... ---` YAML frontmatter block. Intentionally minimal: handles the
-/// single-line `key: value` and inline-list shapes our skills use, not the full
-/// YAML grammar (no block scalars / nested maps).
+/// `--- ... ---` YAML frontmatter block. Intentionally minimal — not the full
+/// YAML grammar (no nested maps, anchors, flow maps) — but it covers every shape
+/// real skills ship: single-line `key: value`, quoted values, inline lists,
+/// block scalars (`description: >-` + indented lines — common in community
+/// skills, and previously parsed as the literal description `">-"`), multi-line
+/// plain scalars (indented continuation lines), and indented `- item` lists.
+///
+/// Keys are matched at column 0 only, so an indented key nested under another
+/// map is never mistaken for a top-level one.
 pub fn parse_frontmatter(content: &str) -> Option<(String, String, Vec<String>)> {
     // A leading UTF-8 BOM (U+FEFF) is not whitespace to `str::trim`, so an
     // untouched line 1 would never equal "---"; strip it before the check.
     let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
-    let mut lines = content.lines();
+    let mut lines = content.lines().peekable();
     if lines.next()?.trim() != "---" {
         return None;
     }
     let (mut name, mut description, mut keywords) = (String::new(), String::new(), Vec::new());
-    for line in lines {
+    while let Some(line) = lines.next() {
         let t = line.trim_end();
         if t.trim() == "---" {
             break;
         }
         if let Some(v) = t.strip_prefix("name:") {
-            name = unquote(v.trim());
+            name = scalar_value(v, &mut lines);
         } else if let Some(v) = t.strip_prefix("description:") {
-            description = unquote(v.trim());
+            description = scalar_value(v, &mut lines);
         } else if let Some(v) = t.strip_prefix("keywords:") {
-            keywords = parse_list(v.trim());
+            keywords = list_value(v, &mut lines);
         } else if let Some(v) = t.strip_prefix("aliases:") {
-            keywords.extend(parse_list(v.trim()));
+            keywords.extend(list_value(v, &mut lines));
         }
     }
     Some((name, description, keywords))
+}
+
+type FrontmatterLines<'a> = std::iter::Peekable<std::str::Lines<'a>>;
+
+/// Whether the text after `key:` announces a YAML block scalar: `|` or `>`,
+/// optionally followed by a chomping indicator (`+`/`-`) and/or an explicit
+/// indentation digit.
+fn is_block_scalar_header(head: &str) -> bool {
+    let mut chars = head.chars();
+    matches!(chars.next(), Some('|' | '>'))
+        && chars.all(|c| matches!(c, '+' | '-') || c.is_ascii_digit())
+}
+
+/// A scalar value that may continue past its key's line: a single-line value
+/// (`description: Edit files.`), a block scalar (`description: >-` plus
+/// indented lines), or a multi-line plain scalar (indented continuation lines).
+/// Multi-line forms are folded with single spaces — downstream consumers (the
+/// embedder, phrase extraction, BM25) want prose, not layout.
+fn scalar_value(first: &str, lines: &mut FrontmatterLines) -> String {
+    let head = first.trim();
+    let block = is_block_scalar_header(head);
+    let mut parts: Vec<String> = Vec::new();
+    if !block && !head.is_empty() {
+        parts.push(unquote(head));
+    }
+    while let Some(next) = lines.peek() {
+        let trimmed = next.trim();
+        let indented = next.starts_with([' ', '\t']);
+        if trimmed == "---" || (!indented && !trimmed.is_empty()) {
+            break; // closing fence or the next top-level key
+        }
+        if trimmed.is_empty() && !block {
+            break; // a blank line ends a plain scalar
+        }
+        lines.next();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    }
+    parts.join(" ")
+}
+
+/// A list value: inline (`keywords: [a, b]`) on the key's own line, or indented
+/// `- item` lines after a bare `keywords:`. Items are lowercased like
+/// [`parse_list`].
+fn list_value(first: &str, lines: &mut FrontmatterLines) -> Vec<String> {
+    let head = first.trim();
+    if !head.is_empty() {
+        return parse_list(head);
+    }
+    let mut out = Vec::new();
+    while let Some(next) = lines.peek() {
+        let trimmed = next.trim();
+        if !next.starts_with([' ', '\t']) || !trimmed.starts_with('-') {
+            break;
+        }
+        let item = trimmed.strip_prefix('-').unwrap_or(trimmed).trim();
+        let item = unquote(item).to_ascii_lowercase();
+        lines.next();
+        if !item.is_empty() {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// Whether a description is the unfilled skeleton from a `template/SKILL.md`
@@ -341,6 +442,76 @@ mod tests {
     #[test]
     fn rejects_without_frontmatter() {
         assert!(parse_frontmatter("no frontmatter here").is_none());
+    }
+
+    #[test]
+    fn parses_folded_block_scalar_description() {
+        // The common community shape: `description: >-` with indented lines.
+        // Previously parsed as the literal description ">-", which embedded
+        // garbage and matched nothing.
+        let md = "---\nname: web-scraper\ndescription: >-\n  Scrape structured data from web pages.\n  Use when the user wants tables extracted from HTML.\nversion: 1\n---\nbody\n";
+        let (name, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(name, "web-scraper");
+        assert_eq!(
+            desc,
+            "Scrape structured data from web pages. Use when the user wants tables extracted from HTML."
+        );
+    }
+
+    #[test]
+    fn parses_literal_block_scalar_and_plain_continuation() {
+        // `|` literal block.
+        let md = "---\nname: x\ndescription: |\n  Line one.\n  Line two.\n---\n";
+        let (_, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(desc, "Line one. Line two.");
+        // Plain scalar continued on an indented next line (valid YAML,
+        // previously truncated to the first line).
+        let md = "---\nname: x\ndescription: Edit Word documents\n  with tracked changes.\n---\n";
+        let (_, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(desc, "Edit Word documents with tracked changes.");
+    }
+
+    #[test]
+    fn block_scalar_stops_at_next_key_and_fence() {
+        let md = "---\ndescription: >\n  folded text\nname: real-name\n---\n";
+        let (name, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(desc, "folded text");
+        assert_eq!(name, "real-name");
+    }
+
+    #[test]
+    fn parses_indented_keyword_list() {
+        let md = "---\nname: x\ndescription: d\nkeywords:\n  - Foo\n  - \"Bar Baz\"\n---\n";
+        let (_, _, kw) = parse_frontmatter(md).unwrap();
+        assert_eq!(kw, ["foo", "bar baz"]);
+    }
+
+    #[test]
+    fn nested_indented_keys_are_not_top_level() {
+        // An indented `description:` under some other map must not clobber the
+        // real (absent) top-level one.
+        let md = "---\nname: x\nmetadata:\n  description: nested, not ours\n---\n";
+        let (name, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(name, "x");
+        assert_eq!(desc, "");
+    }
+
+    #[test]
+    fn tolerates_utf8_bom() {
+        let md = "\u{feff}---\nname: x\ndescription: d\n---\n";
+        let (name, desc, _) = parse_frontmatter(md).unwrap();
+        assert_eq!(name, "x");
+        assert_eq!(desc, "d");
+    }
+
+    #[test]
+    fn block_scalar_header_detection() {
+        for h in ["|", ">", "|-", ">-", "|+", ">2", ">-2"] {
+            assert!(is_block_scalar_header(h), "{h}");
+        }
+        for h in ["", "text", "> text", "|x"] {
+            assert!(!is_block_scalar_header(h), "{h}");
+        }
     }
 
     #[test]
@@ -412,6 +583,78 @@ mod tests {
         let s = parse_file(&path).unwrap().unwrap();
         let _ = fs::remove_dir_all(&dir);
         s
+    }
+
+    #[test]
+    fn non_utf8_skill_neither_dies_nor_kills_discovery() {
+        // One stray non-UTF8 byte used to abort `discover` for the WHOLE library
+        // (read_to_string bubbled an error): zero injections for every skill.
+        // Now the file reads lossily and still parses.
+        let dir = std::env::temp_dir().join(format!(
+            "ski-utf8-{}-{}",
+            std::process::id(),
+            fnv1a_64(b"non-utf8")
+        ));
+        let bad = dir.join("bad");
+        let good = dir.join("good");
+        fs::create_dir_all(&bad).unwrap();
+        fs::create_dir_all(&good).unwrap();
+        fs::write(
+            bad.join("SKILL.md"),
+            b"---\nname: latin\ndescription: caf\xe9 menus\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            good.join("SKILL.md"),
+            "---\nname: fine\ndescription: works\n---\n",
+        )
+        .unwrap();
+        let d = discover_all(std::slice::from_ref(&dir));
+        let ids: Vec<&str> = d.skills.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"fine"), "good skill lost: {ids:?}");
+        assert!(ids.contains(&"latin"), "lossy parse dropped: {ids:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_all_reports_skipped_files_with_reason() {
+        let dir = std::env::temp_dir().join(format!(
+            "ski-skip-{}-{}",
+            std::process::id(),
+            fnv1a_64(b"skipped")
+        ));
+        let broken = dir.join("broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("SKILL.md"), "---\nname: no-desc\n---\n").unwrap();
+        let d = discover_all(std::slice::from_ref(&dir));
+        assert!(d.skills.is_empty());
+        assert_eq!(d.skipped.len(), 1);
+        assert!(d.skipped[0].1.contains("description"), "{:?}", d.skipped);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_caps_recursion_depth() {
+        // A tree deeper than the cap must terminate and simply not surface the
+        // too-deep file.
+        let root = std::env::temp_dir().join(format!(
+            "ski-depth-{}-{}",
+            std::process::id(),
+            fnv1a_64(b"depth")
+        ));
+        let mut deep = root.clone();
+        for i in 0..(MAX_WALK_DEPTH + 3) {
+            deep = deep.join(format!("d{i}"));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(
+            deep.join("SKILL.md"),
+            "---\nname: deep\ndescription: too deep\n---\n",
+        )
+        .unwrap();
+        let d = discover_all(std::slice::from_ref(&root));
+        assert!(d.skills.is_empty());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

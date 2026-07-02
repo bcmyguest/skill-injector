@@ -132,6 +132,50 @@ impl Session {
         self.loaded.get(id)
     }
 
+    /// Persist like [`save`](Self::save), but first merge the `loaded` ledger
+    /// with whatever is on disk *now*, so a mark written by a concurrent process
+    /// survives. The hook loads its session snapshot, then spends the better part
+    /// of a second embedding/reranking before saving — ample time for `ski
+    /// observe` to record a model self-load that a plain save would overwrite
+    /// (the lost mark re-arms dedup and the skill gets re-injected).
+    ///
+    /// Merge rules, per skill id (dedup-safety errs toward suppression):
+    /// - present only on disk → kept (that's the concurrent writer's mark);
+    /// - `Model` beats `Ski` regardless of side (a used skill stays used);
+    /// - both `Ski` → the higher recorded confidence wins (matches
+    ///   [`should_recommend`](Self::should_recommend)'s "no repeat after a HIGH
+    ///   showing").
+    ///
+    /// Prompt fields (`last_prompt`, `recent_prompts`) are taken from `self`:
+    /// the hook is their only writer, and there is at most one hook per prompt.
+    /// Callers that intentionally *wipe* state (the compaction re-arm) must use
+    /// the plain [`save`](Self::save), or the merge would resurrect the ledger.
+    ///
+    /// The load→rename window still exists but shrinks from the whole hook
+    /// runtime to microseconds; closing it fully would need an advisory lock.
+    pub fn save_merged(&self, path: &Path) -> anyhow::Result<()> {
+        let disk = Session::load(path);
+        let mut merged = self.clone();
+        for (id, theirs) in disk.loaded {
+            match merged.loaded.get(&id) {
+                None => {
+                    merged.loaded.insert(id, theirs);
+                }
+                Some(ours) => {
+                    let take_theirs = match (theirs.source, ours.source) {
+                        (Source::Model, Source::Ski) => true,
+                        (Source::Ski, Source::Model) => false,
+                        _ => theirs.confidence > ours.confidence,
+                    };
+                    if take_theirs {
+                        merged.loaded.insert(id, theirs);
+                    }
+                }
+            }
+        }
+        merged.save(path)
+    }
+
     /// Whether `id` should be recommended now, at `new_conf`, given what we
     /// already know. The two dedup rules:
     /// - a **used** skill (`Source::Model`) is never recommended again;
@@ -395,6 +439,84 @@ mod tests {
             .filter(|n| n != "conv.json")
             .collect();
         assert!(leftovers.is_empty(), "temp file left behind: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_merged_keeps_concurrent_writers_mark() {
+        // The exact lost-update race (C2b): the hook loads its snapshot, then a
+        // concurrent `observe` records a model self-load, then the hook saves.
+        // A plain save drops the observe mark (re-arming dedup for a skill the
+        // model already used); save_merged must keep it.
+        let dir = std::env::temp_dir().join(format!(
+            "ski-session-merge-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        let path = dir.join("conv.json");
+
+        let hook_snapshot = Session::load(&path); // hook loads (empty) state
+
+        let mut observe = Session::load(&path); // concurrent observe...
+        observe.mark_used("xlsx");
+        observe.save(&path).unwrap(); // ...lands its mark first
+
+        let mut hook = hook_snapshot;
+        hook.mark_recommended("pdf", 0.9);
+        hook.save_merged(&path).unwrap(); // hook saves its stale snapshot
+
+        let merged = Session::load(&path);
+        assert_eq!(merged.loaded["xlsx"].source, Source::Model, "mark lost");
+        assert_eq!(merged.loaded["pdf"].source, Source::Ski);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_merged_model_beats_ski_and_max_confidence_wins() {
+        let dir = std::env::temp_dir().join(format!(
+            "ski-session-merge2-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        let path = dir.join("conv.json");
+
+        // Disk: a used; b recommended at HIGH.
+        let mut disk = Session::default();
+        disk.mark_used("a");
+        disk.mark_recommended("b", 0.9);
+        disk.save(&path).unwrap();
+
+        // Ours: a merely recommended (must stay Model); b re-shown lower (the
+        // HIGH record must survive so should_recommend keeps suppressing).
+        let mut ours = Session::default();
+        ours.mark_recommended("a", 0.99);
+        ours.mark_recommended("b", 0.6);
+        ours.save_merged(&path).unwrap();
+
+        let merged = Session::load(&path);
+        assert_eq!(merged.loaded["a"].source, Source::Model);
+        assert!(merged.loaded["b"].confidence > 0.8);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_save_still_wipes_for_compaction() {
+        // The compact re-arm intentionally clears; it must NOT merge old marks
+        // back (that's why session_start uses save, not save_merged).
+        let dir = std::env::temp_dir().join(format!(
+            "ski-session-wipe-{}-{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        let path = dir.join("conv.json");
+        let mut s = Session::default();
+        s.mark_used("a");
+        s.save(&path).unwrap();
+
+        let mut rearmed = Session::load(&path);
+        rearmed.clear();
+        rearmed.save(&path).unwrap();
+        assert!(Session::load(&path).loaded.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
