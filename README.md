@@ -157,6 +157,9 @@ ski history                   # aggregate: recommended vs. actually-used, top fa
 ski history --tail 20         # last 20 events interleaved: recommendations (prompt + per-candidate
                               #   confidence + used?) and self-loads (acted-on-rec vs. RECALL MISS + prompt)
 ski history --tail 20 --session conv-abc   # ...filtered to one conversation
+ski suggest                   # turn the log into actions: force/keyword suggestions for skills
+                              #   the model keeps self-loading while ski stays silent, deny
+                              #   suggestions for repeat never-used injections (read-only)
 ski clear                     # re-arm injection (wipe per-session dedup); --telemetry also wipes the log
 
 # Hook hot-path (stdin event -> injection JSON on stdout):

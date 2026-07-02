@@ -9,6 +9,7 @@ use ski::hook::{self, Host};
 use ski::index::{self, Index};
 use ski::{
     context, history, init, lexical, observe, paths, pipeline, rank, rerank, session_start, skill,
+    suggest,
 };
 
 #[derive(Parser)]
@@ -101,6 +102,16 @@ enum Cmd {
         #[arg(long)]
         telemetry: bool,
     },
+    /// Turn the telemetry log into concrete tuning actions: `force`/keyword
+    /// suggestions for skills the model keeps self-loading while ski stays
+    /// silent, and `deny` suggestions for skills ski keeps injecting that are
+    /// never used. Read-only — nothing is applied automatically. Empty unless
+    /// hooks ran with telemetry enabled.
+    Suggest {
+        /// Which host's index to resolve skills against ('claude' or 'opencode').
+        #[arg(long, default_value = "claude")]
+        host: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -125,6 +136,7 @@ fn main() -> Result<()> {
             compare,
         } => history::run(tail, session.as_deref(), compare),
         Cmd::Clear { telemetry } => history::clear(telemetry),
+        Cmd::Suggest { host } => suggest::run(host.parse::<Host>()?),
     }
 }
 

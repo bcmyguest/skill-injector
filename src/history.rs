@@ -647,8 +647,8 @@ fn short(session: &str) -> String {
     session.chars().take(8).collect()
 }
 
-/// One-line, length-capped prompt for the listing.
-fn truncate(s: &str, max: usize) -> String {
+/// One-line, length-capped prompt for the listing (shared with `ski suggest`).
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     let s = s.replace('\n', " ");
     if s.chars().count() <= max {
         s

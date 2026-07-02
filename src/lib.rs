@@ -23,6 +23,7 @@ pub mod rerank;
 pub mod session;
 pub mod session_start;
 pub mod skill;
+pub mod suggest;
 pub mod telemetry;
 pub mod text;
 pub mod trace;

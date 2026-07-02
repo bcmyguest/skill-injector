@@ -106,7 +106,11 @@ pub fn build(
 /// `why`, when present, is inlined as the recommendation's evidence ("this
 /// workspace is a uv project"): concrete, checkable grounds are harder for the
 /// model to wave off than a bare relevance claim, and they let it verify fit
-/// instead of guessing.
+/// instead of guessing. NOTE: unlike the verb strength above, the evidence
+/// line's effect on compliance is *not yet probe-tested* — it rests on the
+/// rationale here, not measurement. Validate with the same `claude -p` A/B
+/// methodology (same prompt + skill, directive with vs. without the evidence
+/// clause, N trials each) before treating it as load-bearing.
 fn directive_block(
     entry: &Entry,
     strength: Strength,
