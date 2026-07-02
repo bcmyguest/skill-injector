@@ -118,11 +118,7 @@ pub fn scores(prompt: &str, idx: &Index) -> Vec<Lex> {
             }
         })
         .collect();
-    out.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
     out
 }
 
@@ -141,7 +137,10 @@ pub fn dominant(prompt: &str, idx: &Index, cfg: &Config) -> Option<Lex> {
     if top.score < cfg.lexical_min {
         return None;
     }
-    let second = ranked.get(1).map(|l| l.score).unwrap_or(0.0);
+    // Dominance is *over peers*: with no runner-up (a single-skill library) the
+    // margin gate would pass vacuously and the fast-path would fire on the sole
+    // skill for any two-term overlap. No peers -> no dominance -> defer.
+    let second = ranked.get(1).map(|l| l.score)?;
     if top.score - second < cfg.lexical_margin {
         return None;
     }
@@ -271,6 +270,17 @@ mod tests {
         ]);
         let win = dominant("edit the spreadsheet formulas", &idx2, &cfg(0.1, 0.1)).unwrap();
         assert_eq!(win.id, "xlsx");
+    }
+
+    #[test]
+    fn single_skill_library_is_never_dominant() {
+        // With no runner-up the margin gate would pass vacuously; the sole skill
+        // must not ride the fast-path on any two-term overlap.
+        let idx = index_of(vec![entry(
+            "xlsx",
+            "edit a spreadsheet, charts and formulas",
+        )]);
+        assert!(dominant("edit the spreadsheet formulas", &idx, &cfg(0.1, 0.1)).is_none());
     }
 
     #[test]

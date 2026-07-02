@@ -77,7 +77,7 @@ pub fn confident_winner(hits: &[Hit], cfg: &Config) -> bool {
         return false;
     }
     let mut cos: Vec<f32> = hits.iter().map(|h| h.cosine).collect();
-    cos.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    cos.sort_by(|a, b| b.total_cmp(a));
     let c1 = cos[0];
     let c2 = cos.get(1).copied().unwrap_or(0.0);
     c1 >= cfg.high_conf && (c1 - c2) >= cfg.clear_gap
